@@ -9,7 +9,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
 # ============================================
-#  КОНФИГУРАЦИЯ (переменные окружения)
+#  КОНФИГУРАЦИЯ
 # ============================================
 
 BOT_TOKEN = os.environ['BOT_TOKEN']
@@ -18,7 +18,7 @@ ADMIN_CHAT_ID = int(os.environ['ADMIN_CHAT_ID'])
 SHEET_ORDERS = os.environ.get('SHEET_ORDERS', 'Заказы')
 SHEET_EXPENSES = os.environ.get('SHEET_EXPENSES', 'Расходы')
 
-# Подключение к Google Sheets (один раз при старте)
+# Подключение к Google Sheets
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
 client = gspread.authorize(creds)
@@ -26,12 +26,12 @@ sheet_orders = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_ORDERS)
 sheet_expenses = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_EXPENSES)
 
 # ============================================
-#  СОЗДАНИЕ ПРИЛОЖЕНИЯ TELEGRAM
+#  ПРИЛОЖЕНИЕ TELEGRAM
 # ============================================
 
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# Хранилище состояний диалогов (в памяти)
+# Хранилище состояний диалогов
 user_data = {}
 
 # ============================================
@@ -72,7 +72,7 @@ def pagination_keyboard(page, total_pages):
     return InlineKeyboardMarkup(buttons)
 
 # ============================================
-#  ОБРАБОТЧИКИ КОМАНД
+#  ОБРАБОТЧИКИ КОМАНД (те же)
 # ============================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -341,28 +341,37 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 app.add_handler(CallbackQueryHandler(filter_callback))
 
 # ============================================
-#  FLASK-ПРИЛОЖЕНИЕ ДЛЯ ВЕБХУКА
+#  FLASK-ПРИЛОЖЕНИЕ (синхронный вебхук)
 # ============================================
 
 flask_app = Flask(__name__)
+
+# Инициализация приложения Telegram (синхронно)
+def init_telegram_app():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(app.initialize())
+    loop.close()
+
+init_telegram_app()
 
 @flask_app.route('/', methods=['GET'])
 def index():
     return "Bot is running!", 200
 
 @flask_app.route('/webhook', methods=['POST'])
-async def webhook():
+def webhook():
     try:
         if request.headers.get('content-type') == 'application/json':
             json_data = request.get_json()
             if not json_data:
                 return Response('Invalid JSON', status=400)
             update = Update.de_json(json_data, app.bot)
-            # Инициализируем приложение, если ещё не инициализировано
-            if not getattr(app, '_initialized', False):
-                await app.initialize()
-                app._initialized = True
-            await app.process_update(update)
+            # Обработка в синхронном режиме
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(app.process_update(update))
+            loop.close()
             return Response('ok', status=200)
         else:
             return Response('Bad Request', status=400)
@@ -373,19 +382,9 @@ async def webhook():
         return Response('Internal Error', status=500)
 
 # ============================================
-#  ЗАПУСК (установка вебхука + запуск Flask)
+#  ЗАПУСК
 # ============================================
 
 if __name__ == '__main__':
-    # Устанавливаем вебхук (сначала инициализируем приложение)
-    async def setup():
-        await app.initialize()
-        app._initialized = True
-        webhook_url = 'https://avtari.onrender.com/webhook'
-        await app.bot.set_webhook(url=webhook_url)
-        print(f"Webhook установлен на {webhook_url}")
-
-    asyncio.run(setup())
-
     port = int(os.environ.get('PORT', 10000))
     flask_app.run(host='0.0.0.0', port=port)
