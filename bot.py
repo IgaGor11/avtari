@@ -17,7 +17,7 @@ ADMIN_CHAT_ID = int(os.environ['ADMIN_CHAT_ID'])
 SHEET_ORDERS = os.environ.get('SHEET_ORDERS', 'Заказы')
 SHEET_EXPENSES = os.environ.get('SHEET_EXPENSES', 'Расходы')
 
-# Подключение к Google Sheets (один раз)
+# Подключение к Google Sheets
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
 client = gspread.authorize(creds)
@@ -67,17 +67,31 @@ def pagination_keyboard(page, total_pages):
     return InlineKeyboardMarkup(buttons)
 
 # ============================================
+#  ЛОГИРОВАНИЕ (вывод в консоль Render)
+# ============================================
+
+def log_command(update, command):
+    chat_id = update.effective_chat.id
+    print(f"[LOG] Команда {command} от chat_id={chat_id}")
+
+# ============================================
 #  ОБРАБОТЧИКИ
 # ============================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_command(update, "/start")
     await update.message.reply_text(
         "👋 Привет! Я бот для учёта заказов.\n\n"
         "Выберите действие из меню ниже 👇",
         reply_markup=main_keyboard
     )
 
+async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_command(update, "/test")
+    await update.message.reply_text("✅ Бот работает! Это тестовая команда.")
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_command(update, "/help")
     await update.message.reply_text(
         "📌 *Доступные действия:*\n"
         "• /new_order – добавить заказ\n"
@@ -89,6 +103,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def new_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_command(update, "/new_order")
     chat_id = update.effective_chat.id
     user_data[chat_id] = {'step': 'client'}
     await update.message.reply_text("📝 Введите *имя клиента* (или ФИО):", parse_mode="Markdown")
@@ -100,6 +115,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = user_data[chat_id]
     step = state['step']
     text = update.message.text
+    print(f"[LOG] Диалог шаг {step}, текст: {text}")
 
     if step == 'client':
         state['client'] = text
@@ -153,11 +169,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("✅ *Заказ успешно добавлен!*", parse_mode="Markdown")
             await context.bot.send_message(ADMIN_CHAT_ID, f"🆕 *Новый заказ* от {state.get('client', 'Неизвестно')} на сумму {state.get('amount', '0')} руб.")
         except Exception as e:
+            print(f"[ERROR] Ошибка сохранения заказа: {e}")
             await update.message.reply_text(f"❌ *Ошибка сохранения:* {e}", parse_mode="Markdown")
         del user_data[chat_id]
         await update.message.reply_text("Главное меню:", reply_markup=main_keyboard)
 
 async def list_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_command(update, "/list_orders")
     await update.message.reply_text(
         "🔍 *Выберите фильтр для списка заказов:*",
         reply_markup=filter_keyboard,
@@ -170,6 +188,7 @@ async def filter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
+    print(f"[LOG] Callback data: {data}")
 
     if data == "cancel_filter":
         await query.edit_message_text("❌ Фильтр отменён.", reply_markup=None)
@@ -198,6 +217,7 @@ async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     page = context.user_data.get('page', 1)
     filter_type = context.user_data.get('filter')
+    print(f"[LOG] Показ страницы {page}, фильтр {filter_type}")
 
     try:
         records = sheet_orders.get_all_values()
@@ -248,9 +268,11 @@ async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=keyboard)
 
     except Exception as e:
+        print(f"[ERROR] Ошибка в show_orders_page: {e}")
         await query.edit_message_text(f"❌ *Ошибка:* {e}", parse_mode="Markdown")
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_command(update, "/stats")
     try:
         orders = sheet_orders.get_all_values()
         expenses = sheet_expenses.get_all_values()
@@ -283,9 +305,11 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=main_keyboard)
     except Exception as e:
+        print(f"[ERROR] Ошибка в stats: {e}")
         await update.message.reply_text(f"❌ *Ошибка:* {e}", parse_mode="Markdown")
 
 async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_command(update, "/add_expense")
     try:
         args = context.args
         if len(args) < 2:
@@ -301,9 +325,11 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sheet_expenses.append_row(row)
         await update.message.reply_text(f"✅ *Расход {amount} руб. добавлен.*", parse_mode="Markdown")
     except Exception as e:
+        print(f"[ERROR] Ошибка в add_expense: {e}")
         await update.message.reply_text(f"❌ *Ошибка:* {e}", parse_mode="Markdown")
 
 async def update_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_command(update, "/update_status")
     try:
         args = context.args
         if len(args) < 2:
@@ -319,14 +345,16 @@ async def update_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sheet_orders.update_cell(row_num, 8, new_status)
         await update.message.reply_text(f"✅ *Статус заказа {order_id} обновлён на '{new_status}'*", parse_mode="Markdown")
     except Exception as e:
+        print(f"[ERROR] Ошибка в update_status: {e}")
         await update.message.reply_text(f"❌ *Ошибка:* {e}", parse_mode="Markdown")
 
 # ============================================
-#  РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ
+#  РЕГИСТРАЦИЯ
 # ============================================
 
 app.add_handler(CommandHandler('start', start))
 app.add_handler(CommandHandler('help', help_command))
+app.add_handler(CommandHandler('test', test_command))          # <-- новая тестовая команда
 app.add_handler(CommandHandler('new_order', new_order))
 app.add_handler(CommandHandler('list_orders', list_orders))
 app.add_handler(CommandHandler('update_status', update_status))
@@ -348,12 +376,11 @@ async def handle_webhook(request):
         await app.process_update(update)
         return web.Response(status=200, text='ok')
     except Exception as e:
-        print(f"Webhook error: {e}")
+        print(f"[ERROR] Webhook: {e}")
         import traceback
         traceback.print_exc()
         return web.Response(status=500, text='Internal Error')
 
-# Создаём aiohttp приложение
 web_app = web.Application()
 web_app.router.add_post('/webhook', handle_webhook)
 web_app.router.add_get('/', lambda request: web.Response(text='Bot is running!'))
@@ -363,23 +390,19 @@ web_app.router.add_get('/', lambda request: web.Response(text='Bot is running!')
 # ============================================
 
 async def setup_and_run():
-    # Инициализация бота
     await app.initialize()
     app._initialized = True
-
-    # Установка вебхука
     webhook_url = 'https://avtari.onrender.com/webhook'
     await app.bot.set_webhook(url=webhook_url)
     print(f"Webhook установлен на {webhook_url}")
 
-    # Запуск aiohttp сервера
     runner = web.AppRunner(web_app)
     await runner.setup()
     port = int(os.environ.get('PORT', 10000))
     site = web.TCPSite(runner, host='0.0.0.0', port=port)
     await site.start()
     print(f"Сервер запущен на порту {port}")
-    await asyncio.Event().wait()  # Бесконечное ожидание
+    await asyncio.Event().wait()
 
 if __name__ == '__main__':
     asyncio.run(setup_and_run())
