@@ -1,6 +1,7 @@
 import os
 import datetime
 import json
+import asyncio
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from flask import Flask, request, Response
@@ -8,7 +9,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
 # ============================================
-#  КОНФИГУРАЦИЯ
+#  КОНФИГУРАЦИЯ (переменные окружения)
 # ============================================
 
 BOT_TOKEN = os.environ['BOT_TOKEN']
@@ -17,7 +18,7 @@ ADMIN_CHAT_ID = int(os.environ['ADMIN_CHAT_ID'])
 SHEET_ORDERS = os.environ.get('SHEET_ORDERS', 'Заказы')
 SHEET_EXPENSES = os.environ.get('SHEET_EXPENSES', 'Расходы')
 
-# Подключение к Google Sheets (один раз)
+# Подключение к Google Sheets (один раз при старте)
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
 client = gspread.authorize(creds)
@@ -25,14 +26,18 @@ sheet_orders = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_ORDERS)
 sheet_expenses = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_EXPENSES)
 
 # ============================================
-#  ИНИЦИАЛИЗАЦИЯ БОТА (через Application)
+#  СОЗДАНИЕ ПРИЛОЖЕНИЯ TELEGRAM
 # ============================================
 
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+# Хранилище состояний диалогов (в памяти)
 user_data = {}
 
-# Клавиатуры
+# ============================================
+#  КЛАВИАТУРЫ
+# ============================================
+
 main_keyboard = ReplyKeyboardMarkup(
     [
         ["📦 Новый заказ", "📋 Список заказов"],
@@ -322,7 +327,7 @@ async def update_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ *Ошибка:* {e}", parse_mode="Markdown")
 
 # ============================================
-#  НАСТРОЙКА ОБРАБОТЧИКОВ (регистрируем)
+#  РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ
 # ============================================
 
 app.add_handler(CommandHandler('start', start))
@@ -336,7 +341,7 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 app.add_handler(CallbackQueryHandler(filter_callback))
 
 # ============================================
-#  FLASK-ПРИЛОЖЕНИЕ ДЛЯ ВЕБХУКА
+#  FLASK-ПРИЛОЖЕНИЕ ДЛЯ ВЕБХУКА (с поддержкой async)
 # ============================================
 
 flask_app = Flask(__name__)
@@ -347,22 +352,26 @@ def index():
 
 @flask_app.route('/webhook', methods=['POST'])
 async def webhook():
-    if request.headers.get('content-type') == 'application/json':
-        json_data = request.get_json()
-        update = Update.de_json(json_data, app.bot)
-        await app.process_update(update)
-        return Response('ok', status=200)
-    else:
-        return Response('Bad Request', status=400)
+    try:
+        if request.headers.get('content-type') == 'application/json':
+            json_data = request.get_json()
+            if not json_data:
+                return Response('Invalid JSON', status=400)
+            update = Update.de_json(json_data, app.bot)
+            await app.process_update(update)
+            return Response('ok', status=200)
+        else:
+            return Response('Bad Request', status=400)
+    except Exception as e:
+        print(f"Webhook error: {e}")
+        return Response('Internal Error', status=500)
 
 # ============================================
-#  ЗАПУСК (выполняется только в main)
+#  ЗАПУСК (установка вебхука + запуск Flask)
 # ============================================
 
 if __name__ == '__main__':
     # Устанавливаем вебхук на наш URL
-    # URL будет https://avtari.onrender.com/webhook
-    import asyncio
     async def set_webhook():
         webhook_url = 'https://avtari.onrender.com/webhook'
         await app.bot.set_webhook(url=webhook_url)
@@ -370,5 +379,6 @@ if __name__ == '__main__':
 
     asyncio.run(set_webhook())
 
-    # Запускаем Flask-сервер (он будет слушать на порту 10000)
-    flask_app.run(host='0.0.0.0', port=10000)
+    # Запускаем Flask-сервер на порту 10000 (Render выдаёт его в переменной PORT, но мы используем 10000)
+    port = int(os.environ.get('PORT', 10000))
+    flask_app.run(host='0.0.0.0', port=port)
