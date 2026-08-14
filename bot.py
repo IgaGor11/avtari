@@ -11,48 +11,30 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, Messa
 #  КОНФИГУРАЦИЯ
 # ============================================
 
-BOT_TOKEN = os.environ.get('BOT_TOKEN')
-SPREADSHEET_ID = os.environ.get('SPREADSHEET_ID')
-ADMIN_CHAT_ID = int(os.environ.get('ADMIN_CHAT_ID', 0))
+BOT_TOKEN = os.environ['BOT_TOKEN']
+SPREADSHEET_ID = os.environ['SPREADSHEET_ID']
+ADMIN_CHAT_ID = int(os.environ['ADMIN_CHAT_ID'])
 SHEET_ORDERS = os.environ.get('SHEET_ORDERS', 'Заказы')
 SHEET_EXPENSES = os.environ.get('SHEET_EXPENSES', 'Расходы')
 
-# ============================================
-#  ПОДКЛЮЧЕНИЕ К GOOGLE SHEETS
-# ============================================
-
-def get_sheets_client():
-    try:
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-        client = gspread.authorize(creds)
-        return client
-    except Exception as e:
-        print(f"[ERROR] Не удалось подключиться к Google Sheets: {e}")
-        return None
-
-client = get_sheets_client()
-sheet_orders = None
-sheet_expenses = None
-if client:
-    try:
-        sheet_orders = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_ORDERS)
-        sheet_expenses = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_EXPENSES)
-        print("[INFO] Подключение к Google Sheets успешно.")
-    except Exception as e:
-        print(f"[ERROR] Ошибка при доступе к таблице: {e}")
-else:
-    print("[ERROR] Клиент Google Sheets не создан.")
+# Подключение к Google Sheets (глобальное)
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+client = gspread.authorize(creds)
+sheet_orders = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_ORDERS)
+sheet_expenses = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_EXPENSES)
 
 # ============================================
 #  БОТ
 # ============================================
 
 app = ApplicationBuilder().token(BOT_TOKEN).build()
-
 user_data = {}
 
-# Клавиатуры
+# ============================================
+#  КЛАВИАТУРЫ
+# ============================================
+
 main_keyboard = ReplyKeyboardMarkup(
     [
         ["📦 Новый заказ", "📋 Список заказов"],
@@ -87,73 +69,11 @@ def pagination_keyboard(page, total_pages):
     return InlineKeyboardMarkup(buttons)
 
 # ============================================
-#  ЛОГИРОВАНИЕ
-# ============================================
-
-def log_command(update, command):
-    chat_id = update.effective_chat.id
-    print(f"[LOG] Команда {command} от chat_id={chat_id}")
-
-# ============================================
-#  КОМАНДА /STATUS — ДИАГНОСТИКА
-# ============================================
-
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log_command(update, "/status")
-    chat_id = update.effective_chat.id
-    msg = "🔍 *Диагностика бота:*\n\n"
-    
-    # 1. Проверка переменных окружения
-    msg += "📌 *Переменные окружения:*\n"
-    msg += f"• BOT_TOKEN: {'✅ задан' if BOT_TOKEN else '❌ отсутствует'}\n"
-    msg += f"• SPREADSHEET_ID: {'✅ задан' if SPREADSHEET_ID else '❌ отсутствует'}\n"
-    msg += f"• ADMIN_CHAT_ID: {'✅ задан' if ADMIN_CHAT_ID else '❌ отсутствует'}\n"
-    msg += f"• SHEET_ORDERS: {SHEET_ORDERS}\n"
-    msg += f"• SHEET_EXPENSES: {SHEET_EXPENSES}\n\n"
-
-    # 2. Проверка подключения к Google Sheets
-    msg += "📌 *Google Sheets:*\n"
-    if client:
-        msg += "• Клиент: ✅ создан\n"
-        try:
-            # Проверяем доступ к таблице
-            sheet = client.open_by_key(SPREADSHEET_ID)
-            msg += f"• Таблица: ✅ открыта (ID: {SPREADSHEET_ID})\n"
-            # Проверяем наличие листов
-            try:
-                orders = sheet.worksheet(SHEET_ORDERS)
-                rows_orders = len(orders.get_all_values())
-                msg += f"• Лист '{SHEET_ORDERS}': ✅ найден, записей: {rows_orders}\n"
-            except Exception as e:
-                msg += f"• Лист '{SHEET_ORDERS}': ❌ не найден или ошибка: {e}\n"
-            try:
-                expenses = sheet.worksheet(SHEET_EXPENSES)
-                rows_expenses = len(expenses.get_all_values())
-                msg += f"• Лист '{SHEET_EXPENSES}': ✅ найден, записей: {rows_expenses}\n"
-            except Exception as e:
-                msg += f"• Лист '{SHEET_EXPENSES}': ❌ не найден или ошибка: {e}\n"
-        except Exception as e:
-            msg += f"• ❌ Ошибка доступа к таблице: {e}\n"
-    else:
-        msg += "• Клиент: ❌ не создан (проверьте файл credentials.json)\n"
-
-    # 3. Проверка вебхука
-    msg += "\n📌 *Вебхук:*\n"
-    try:
-        info = await context.bot.get_webhook_info()
-        msg += f"• URL: {info.url if info.url else 'не установлен'}\n"
-        msg += f"• Ожидающих обновлений: {info.pending_update_count}\n"
-    except Exception as e:
-        msg += f"• ❌ Ошибка получения информации: {e}\n"
-
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
-# ============================================
-#  ОСТАЛЬНЫЕ ОБРАБОТЧИКИ (без изменений, но с улучшенным логированием)
+#  ОБРАБОТЧИКИ КОМАНД
 # ============================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log_command(update, "/start")
+    print(f"[LOG] /start от {update.effective_chat.id}")
     await update.message.reply_text(
         "👋 Привет! Я бот для учёта заказов.\n\n"
         "Выберите действие из меню ниже 👇",
@@ -161,31 +81,81 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log_command(update, "/test")
+    print(f"[LOG] /test от {update.effective_chat.id}")
     await update.message.reply_text("✅ Бот работает! Это тестовая команда.")
 
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Диагностика состояния бота"""
+    print(f"[LOG] /status от {update.effective_chat.id}")
+    try:
+        # Проверка переменных окружения
+        env_status = {
+            'BOT_TOKEN': '✅' if BOT_TOKEN else '❌',
+            'SPREADSHEET_ID': '✅' if SPREADSHEET_ID else '❌',
+            'ADMIN_CHAT_ID': '✅' if ADMIN_CHAT_ID else '❌',
+            'SHEET_ORDERS': SHEET_ORDERS,
+            'SHEET_EXPENSES': SHEET_EXPENSES
+        }
+        # Проверка Google Sheets
+        try:
+            orders_count = len(sheet_orders.get_all_values()) - 1
+            expenses_count = len(sheet_expenses.get_all_values()) - 1
+            gs_status = f"✅ Лист 'Заказы': {orders_count} записей, Лист 'Расходы': {expenses_count} записей"
+        except Exception as e:
+            gs_status = f"❌ Ошибка доступа к таблице: {e}"
+
+        # Проверка вебхука
+        webhook_info = await app.bot.get_webhook_info()
+        webhook_url = webhook_info.url if webhook_info else "не установлен"
+        pending = webhook_info.pending_update_count if webhook_info else 0
+
+        msg = (
+            "🔍 *Диагностика бота:*\n\n"
+            "📌 *Переменные окружения:*\n"
+            f"• BOT_TOKEN: {env_status['BOT_TOKEN']}\n"
+            f"• SPREADSHEET_ID: {env_status['SPREADSHEET_ID']}\n"
+            f"• ADMIN_CHAT_ID: {env_status['ADMIN_CHAT_ID']}\n"
+            f"• SHEET_ORDERS: {env_status['SHEET_ORDERS']}\n"
+            f"• SHEET_EXPENSES: {env_status['SHEET_EXPENSES']}\n\n"
+            f"📌 *Google Sheets:*\n{gs_status}\n\n"
+            f"📌 *Вебхук:*\nURL: {webhook_url}\nОжидающих обновлений: {pending}"
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка в диагностике: {e}")
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log_command(update, "/help")
+    print(f"[LOG] /help от {update.effective_chat.id}")
     await update.message.reply_text(
         "📌 *Доступные действия:*\n"
         "• /new_order – добавить заказ\n"
         "• /list_orders – список заказов (с фильтрами)\n"
         "• /stats – статистика\n"
-        "• /add_expense сумма описание – добавить расход\n\n"
+        "• /add_expense сумма описание – добавить расход\n"
+        "• /update_status ID статус – обновить статус\n"
+        "• /test – проверить работу бота\n"
+        "• /status – диагностика\n\n"
         "Также вы можете использовать кнопки меню.",
         parse_mode="Markdown"
     )
 
 async def new_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log_command(update, "/new_order")
+    print(f"[LOG] /new_order от {update.effective_chat.id}")
     chat_id = update.effective_chat.id
     user_data[chat_id] = {'step': 'client'}
     await update.message.reply_text("📝 Введите *имя клиента* (или ФИО):", parse_mode="Markdown")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Явно игнорируем команды (защита от перехвата)
+    if update.message and update.message.text and update.message.text.startswith('/'):
+        print(f"[LOG] Игнорируем команду в handle_message: {update.message.text}")
+        return
+
     chat_id = update.effective_chat.id
     if chat_id not in user_data:
+        print(f"[LOG] Нет активного диалога для chat_id={chat_id}")
         return
+
     state = user_data[chat_id]
     step = state['step']
     text = update.message.text
@@ -227,8 +197,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state['amount'] = text
         try:
             amount_value = float(state['amount'].replace(',', '.')) if state['amount'].replace(',', '').replace('.', '').isdigit() else 0
-            if sheet_orders is None:
-                raise Exception("Лист 'Заказы' не доступен.")
             row = [
                 datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 state.get('client', ''),
@@ -243,8 +211,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             sheet_orders.append_row(row)
             await update.message.reply_text("✅ *Заказ успешно добавлен!*", parse_mode="Markdown")
-            if ADMIN_CHAT_ID:
-                await context.bot.send_message(ADMIN_CHAT_ID, f"🆕 *Новый заказ* от {state.get('client', 'Неизвестно')} на сумму {state.get('amount', '0')} руб.")
+            await context.bot.send_message(ADMIN_CHAT_ID, f"🆕 *Новый заказ* от {state.get('client', 'Неизвестно')} на сумму {state.get('amount', '0')} руб.")
         except Exception as e:
             print(f"[ERROR] Ошибка сохранения заказа: {e}")
             await update.message.reply_text(f"❌ *Ошибка сохранения:* {e}", parse_mode="Markdown")
@@ -252,10 +219,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Главное меню:", reply_markup=main_keyboard)
 
 async def list_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log_command(update, "/list_orders")
-    if sheet_orders is None:
-        await update.message.reply_text("❌ *Нет доступа к таблице 'Заказы'. Проверьте настройки.*", parse_mode="Markdown")
-        return
+    print(f"[LOG] /list_orders от {update.effective_chat.id}")
     await update.message.reply_text(
         "🔍 *Выберите фильтр для списка заказов:*",
         reply_markup=filter_keyboard,
@@ -300,8 +264,6 @@ async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"[LOG] Показ страницы {page}, фильтр {filter_type}")
 
     try:
-        if sheet_orders is None:
-            raise Exception("Нет доступа к таблице 'Заказы'")
         records = sheet_orders.get_all_values()
         if len(records) <= 1:
             await query.edit_message_text("📭 *Заказов пока нет.*", parse_mode="Markdown")
@@ -354,10 +316,8 @@ async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"❌ *Ошибка:* {e}", parse_mode="Markdown")
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log_command(update, "/stats")
+    print(f"[LOG] /stats от {update.effective_chat.id}")
     try:
-        if sheet_orders is None or sheet_expenses is None:
-            raise Exception("Нет доступа к таблице")
         orders = sheet_orders.get_all_values()
         expenses = sheet_expenses.get_all_values()
         total_revenue = 0
@@ -393,10 +353,8 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ *Ошибка:* {e}", parse_mode="Markdown")
 
 async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log_command(update, "/add_expense")
+    print(f"[LOG] /add_expense от {update.effective_chat.id}")
     try:
-        if sheet_expenses is None:
-            raise Exception("Нет доступа к таблице 'Расходы'")
         args = context.args
         if len(args) < 2:
             await update.message.reply_text(
@@ -415,10 +373,8 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ *Ошибка:* {e}", parse_mode="Markdown")
 
 async def update_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log_command(update, "/update_status")
+    print(f"[LOG] /update_status от {update.effective_chat.id}")
     try:
-        if sheet_orders is None:
-            raise Exception("Нет доступа к таблице 'Заказы'")
         args = context.args
         if len(args) < 2:
             await update.message.reply_text(
@@ -437,23 +393,25 @@ async def update_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ *Ошибка:* {e}", parse_mode="Markdown")
 
 # ============================================
-#  РЕГИСТРАЦИЯ
+#  РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ (ВАЖЕН ПОРЯДОК!)
 # ============================================
 
 app.add_handler(CommandHandler('start', start))
 app.add_handler(CommandHandler('help', help_command))
 app.add_handler(CommandHandler('test', test_command))
-app.add_handler(CommandHandler('status', status_command))   # новая команда
+app.add_handler(CommandHandler('status', status_command))
 app.add_handler(CommandHandler('new_order', new_order))
 app.add_handler(CommandHandler('list_orders', list_orders))
 app.add_handler(CommandHandler('update_status', update_status))
 app.add_handler(CommandHandler('stats', stats))
 app.add_handler(CommandHandler('add_expense', add_expense))
+# MessageHandler должен быть ПОСЛЕ всех CommandHandler
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+# CallbackQueryHandler — последним
 app.add_handler(CallbackQueryHandler(filter_callback))
 
 # ============================================
-#  ВЕБХУК
+#  ВЕБХУК НА AIOHTTP
 # ============================================
 
 async def handle_webhook(request):
