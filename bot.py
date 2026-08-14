@@ -1,10 +1,12 @@
 import os
 import datetime
 import asyncio
+import csv
+import io
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from aiohttp import web
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
 # ============================================
@@ -35,15 +37,25 @@ user_data = {}
 #  КЛАВИАТУРЫ
 # ============================================
 
+# Главное меню (всегда показывается после завершения действий)
 main_keyboard = ReplyKeyboardMarkup(
     [
         ["📦 Новый заказ", "📋 Список заказов"],
         ["📊 Статистика", "💰 Добавить расход"],
-        ["❓ Помощь"]
+        ["❓ Помощь", "🔙 Отмена"]
     ],
     resize_keyboard=True
 )
 
+# Клавиатура для диалога (с кнопкой отмены)
+dialog_keyboard = ReplyKeyboardMarkup(
+    [
+        ["🔙 Отмена"]
+    ],
+    resize_keyboard=True
+)
+
+# Inline-клавиатура для фильтров (уже есть)
 filter_keyboard = InlineKeyboardMarkup([
     [InlineKeyboardButton("📌 Все", callback_data="filter_all")],
     [InlineKeyboardButton("🟢 Переговорка", callback_data="status_переговорка"),
@@ -82,7 +94,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"[LOG] /test от {update.effective_chat.id}")
-    await update.message.reply_text("✅ Бот работает! Это тестовая команда.")
+    await update.message.reply_text("✅ Бот работает! Это тестовая команда.", reply_markup=main_keyboard)
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Диагностика состояния бота"""
@@ -117,9 +129,9 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📌 *Google Sheets:*\n{gs_status}\n\n"
             f"📌 *Вебхук:*\nURL: {webhook_url}\nОжидающих обновлений: {pending}"
         )
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=main_keyboard)
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка в диагностике: {e}")
+        await update.message.reply_text(f"❌ Ошибка в диагностике: {e}", reply_markup=main_keyboard)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"[LOG] /help от {update.effective_chat.id}")
@@ -127,30 +139,206 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📌 *Доступные действия:*\n"
         "• /new_order – добавить заказ\n"
         "• /list_orders – список заказов (с фильтрами)\n"
-        "• /stats – статистика\n"
-        "• /add_expense сумма описание – добавить расход\n"
+        "• /view ID – посмотреть детали заказа\n"
         "• /update_status ID статус – обновить статус\n"
+        "• /delete ID – удалить заказ (с подтверждением)\n"
+        "• /stats – общая статистика\n"
+        "• /stats_date ДД.ММ.ГГГГ-ДД.ММ.ГГГГ – статистика за период\n"
+        "• /add_expense сумма описание – добавить расход\n"
+        "• /export – экспорт всех заказов в CSV\n"
         "• /test – проверить работу бота\n"
         "• /status – диагностика\n\n"
         "Также вы можете использовать кнопки меню.",
-        parse_mode="Markdown"
+        parse_mode="Markdown",
+        reply_markup=main_keyboard
     )
+
+# ============================================
+#  НОВЫЙ ЗАКАЗ (диалог)
+# ============================================
 
 async def new_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"[LOG] /new_order от {update.effective_chat.id}")
     chat_id = update.effective_chat.id
     user_data[chat_id] = {'step': 'client'}
-    await update.message.reply_text("📝 Введите *имя клиента* (или ФИО):", parse_mode="Markdown")
-
-async def list_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f"[LOG] /list_orders от {update.effective_chat.id}")
     await update.message.reply_text(
-        "🔍 *Выберите фильтр для списка заказов:*",
-        reply_markup=filter_keyboard,
-        parse_mode="Markdown"
+        "📝 Введите *имя клиента* (или ФИО):",
+        parse_mode="Markdown",
+        reply_markup=dialog_keyboard
     )
-    context.user_data['filter'] = None
-    context.user_data['page'] = 1
+
+# ============================================
+#  ПРОСМОТР ЗАКАЗА ПО ID
+# ============================================
+
+async def view_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print(f"[LOG] /view от {update.effective_chat.id}")
+    try:
+        args = context.args
+        if len(args) < 1:
+            await update.message.reply_text("❌ Используйте: /view ID", reply_markup=main_keyboard)
+            return
+        order_id = int(args[0])
+        row_num = order_id + 1
+        records = sheet_orders.get_all_values()
+        if row_num >= len(records):
+            await update.message.reply_text(f"❌ Заказ с ID {order_id} не найден.", reply_markup=main_keyboard)
+            return
+        row = records[row_num]
+        # row: [Дата, Клиент, Ник, Контакт, Праздник, Город, Формат, Статус, Оплачено, Сумма]
+        msg = (
+            f"📋 *Заказ #{order_id}*\n\n"
+            f"📅 *Дата:* {row[0]}\n"
+            f"👤 *Клиент:* {row[1]}\n"
+            f"🆔 *Ник:* {row[2]}\n"
+            f"📞 *Связь:* {row[3]}\n"
+            f"🎉 *Праздник:* {row[4]}\n"
+            f"🏙️ *Город:* {row[5]}\n"
+            f"📦 *Формат:* {row[6]}\n"
+            f"🔄 *Статус:* {row[7]}\n"
+            f"💰 *Оплата:* {row[8]}\n"
+            f"💸 *Сумма:* {row[9]} руб."
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=main_keyboard)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=main_keyboard)
+
+# ============================================
+#  УДАЛЕНИЕ ЗАКАЗА (с подтверждением)
+# ============================================
+
+async def delete_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print(f"[LOG] /delete от {update.effective_chat.id}")
+    try:
+        args = context.args
+        if len(args) < 1:
+            await update.message.reply_text("❌ Используйте: /delete ID", reply_markup=main_keyboard)
+            return
+        order_id = int(args[0])
+        row_num = order_id + 1
+        records = sheet_orders.get_all_values()
+        if row_num >= len(records):
+            await update.message.reply_text(f"❌ Заказ с ID {order_id} не найден.", reply_markup=main_keyboard)
+            return
+        # Сохраняем данные для подтверждения
+        context.user_data['delete_id'] = order_id
+        context.user_data['delete_row'] = row_num
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Да, удалить", callback_data="confirm_delete"),
+             InlineKeyboardButton("❌ Отмена", callback_data="cancel_delete")]
+        ])
+        await update.message.reply_text(
+            f"⚠️ Вы уверены, что хотите удалить заказ #{order_id}?\n\n"
+            f"Клиент: {records[row_num][1]}, Сумма: {records[row_num][9]} руб.\n"
+            f"Это действие необратимо!",
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=main_keyboard)
+
+async def delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    if data == "confirm_delete":
+        order_id = context.user_data.get('delete_id')
+        row_num = context.user_data.get('delete_row')
+        if order_id and row_num:
+            try:
+                sheet_orders.delete_rows(row_num, row_num)
+                await query.edit_message_text(f"✅ Заказ #{order_id} удалён.")
+            except Exception as e:
+                await query.edit_message_text(f"❌ Ошибка удаления: {e}")
+        else:
+            await query.edit_message_text("❌ Нет данных для удаления.")
+        context.user_data.pop('delete_id', None)
+        context.user_data.pop('delete_row', None)
+    elif data == "cancel_delete":
+        await query.edit_message_text("❌ Удаление отменено.")
+        context.user_data.pop('delete_id', None)
+        context.user_data.pop('delete_row', None)
+    # Показываем главное меню после удаления/отмены
+    await query.message.reply_text("Главное меню:", reply_markup=main_keyboard)
+
+# ============================================
+#  ЭКСПОРТ В CSV
+# ============================================
+
+async def export_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print(f"[LOG] /export от {update.effective_chat.id}")
+    try:
+        records = sheet_orders.get_all_values()
+        if len(records) <= 1:
+            await update.message.reply_text("📭 Нет заказов для экспорта.", reply_markup=main_keyboard)
+            return
+        # Создаём CSV в памяти
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerows(records)
+        output.seek(0)
+        # Отправляем файл
+        await update.message.reply_document(
+            document=output.getvalue().encode('utf-8'),
+            filename=f"заказы_{datetime.datetime.now().strftime('%Y%m%d')}.csv",
+            caption="📊 Экспорт всех заказов",
+            reply_markup=main_keyboard
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка экспорта: {e}", reply_markup=main_keyboard)
+
+# ============================================
+#  СТАТИСТИКА ПО ПЕРИОДУ
+# ============================================
+
+async def stats_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print(f"[LOG] /stats_date от {update.effective_chat.id}")
+    try:
+        args = context.args
+        if len(args) < 1:
+            await update.message.reply_text(
+                "❌ Используйте: /stats_date ДД.ММ.ГГГГ-ДД.ММ.ГГГГ\n"
+                "Например: /stats_date 01.08.2026-15.08.2026",
+                reply_markup=main_keyboard
+            )
+            return
+        dates = args[0].split('-')
+        if len(dates) != 2:
+            raise ValueError("Неверный формат")
+        start = datetime.datetime.strptime(dates[0], '%d.%m.%Y')
+        end = datetime.datetime.strptime(dates[1], '%d.%m.%Y')
+        # Получаем все заказы
+        records = sheet_orders.get_all_values()
+        if len(records) <= 1:
+            await update.message.reply_text("📭 Нет заказов.", reply_markup=main_keyboard)
+            return
+        total_revenue = 0
+        paid_count = 0
+        count = 0
+        for row in records[1:]:
+            if len(row) < 10:
+                continue
+            try:
+                order_date = datetime.datetime.strptime(row[0].split()[0], '%Y-%m-%d')
+                if start <= order_date <= end:
+                    count += 1
+                    if row[8].lower() == 'да':
+                        total_revenue += float(row[9]) if row[9] else 0
+                        paid_count += 1
+            except:
+                continue
+        msg = (
+            f"📊 *Статистика за период {dates[0]} – {dates[1]}*\n\n"
+            f"📦 *Заказов:* {count}\n"
+            f"💰 *Оплачено:* {paid_count}\n"
+            f"💸 *Выручка:* {total_revenue} руб."
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=main_keyboard)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=main_keyboard)
+
+# ============================================
+#  ОСТАЛЬНЫЕ КОМАНДЫ (stats, add_expense, update_status, list_orders, etc.)
+# ============================================
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"[LOG] /stats от {update.effective_chat.id}")
@@ -187,7 +375,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=main_keyboard)
     except Exception as e:
         print(f"[ERROR] Ошибка в stats: {e}")
-        await update.message.reply_text(f"❌ *Ошибка:* {e}", parse_mode="Markdown")
+        await update.message.reply_text(f"❌ *Ошибка:* {e}", parse_mode="Markdown", reply_markup=main_keyboard)
 
 async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"[LOG] /add_expense от {update.effective_chat.id}")
@@ -197,17 +385,18 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "❌ *Используйте:* /add_expense сумма описание\n"
                 "Например: /add_expense 500 Краска",
-                parse_mode="Markdown"
+                parse_mode="Markdown",
+                reply_markup=main_keyboard
             )
             return
         amount = float(args[0].replace(',', '.'))
         desc = ' '.join(args[1:])
         row = [datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), desc, amount]
         sheet_expenses.append_row(row)
-        await update.message.reply_text(f"✅ *Расход {amount} руб. добавлен.*", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ *Расход {amount} руб. добавлен.*", parse_mode="Markdown", reply_markup=main_keyboard)
     except Exception as e:
         print(f"[ERROR] Ошибка в add_expense: {e}")
-        await update.message.reply_text(f"❌ *Ошибка:* {e}", parse_mode="Markdown")
+        await update.message.reply_text(f"❌ *Ошибка:* {e}", parse_mode="Markdown", reply_markup=main_keyboard)
 
 async def update_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"[LOG] /update_status от {update.effective_chat.id}")
@@ -217,145 +406,28 @@ async def update_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "❌ *Используйте:* /update_status ID статус\n"
                 "Например: /update_status 5 отправлено",
-                parse_mode="Markdown"
+                parse_mode="Markdown",
+                reply_markup=main_keyboard
             )
             return
         order_id = int(args[0])
         new_status = ' '.join(args[1:])
         row_num = order_id + 1
         sheet_orders.update_cell(row_num, 8, new_status)
-        await update.message.reply_text(f"✅ *Статус заказа {order_id} обновлён на '{new_status}'*", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ *Статус заказа {order_id} обновлён на '{new_status}'*", parse_mode="Markdown", reply_markup=main_keyboard)
     except Exception as e:
         print(f"[ERROR] Ошибка в update_status: {e}")
-        await update.message.reply_text(f"❌ *Ошибка:* {e}", parse_mode="Markdown")
+        await update.message.reply_text(f"❌ *Ошибка:* {e}", parse_mode="Markdown", reply_markup=main_keyboard)
 
-# ============================================
-#  ОСНОВНОЙ ОБРАБОТЧИК ТЕКСТА (диалоги + кнопки)
-# ============================================
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Игнорируем команды с / (они обрабатываются CommandHandler)
-    if update.message and update.message.text and update.message.text.startswith('/'):
-        return
-
-    chat_id = update.effective_chat.id
-    text = update.message.text
-
-    # ---------- ЕСЛИ ЕСТЬ АКТИВНЫЙ ДИАЛОГ ----------
-    if chat_id in user_data:
-        state = user_data[chat_id]
-        step = state['step']
-        print(f"[LOG] Диалог шаг {step}, текст: {text}")
-
-        if step == 'client':
-            state['client'] = text
-            state['step'] = 'nick'
-            await update.message.reply_text("📝 Введите *ник* (Telegram/Instagram):", parse_mode="Markdown")
-        elif step == 'nick':
-            state['nick'] = text
-            state['step'] = 'contact'
-            await update.message.reply_text("📝 *Способ связи* (Инст, ТГ, Макс):", parse_mode="Markdown")
-        elif step == 'contact':
-            state['contact'] = text
-            state['step'] = 'holiday'
-            await update.message.reply_text("📝 *Дата праздника* (в формате ДД.ММ.ГГГГ):", parse_mode="Markdown")
-        elif step == 'holiday':
-            state['holiday'] = text
-            state['step'] = 'city'
-            await update.message.reply_text("📝 *Город* (Москва, СПб, другой):", parse_mode="Markdown")
-        elif step == 'city':
-            state['city'] = text
-            state['step'] = 'format'
-            await update.message.reply_text("📝 *Формат* (полный, электронная, самовывоз):", parse_mode="Markdown")
-        elif step == 'format':
-            state['format'] = text
-            state['step'] = 'status'
-            await update.message.reply_text("📝 *Статус* (переговорка, дизайн, печать, отправлено):", parse_mode="Markdown")
-        elif step == 'status':
-            state['status'] = text
-            state['step'] = 'paid'
-            await update.message.reply_text("📝 *Оплачено?* (Да / Нет):", parse_mode="Markdown")
-        elif step == 'paid':
-            state['paid'] = text
-            state['step'] = 'amount'
-            await update.message.reply_text("📝 *Сумма* (1800, 1500 или своя):", parse_mode="Markdown")
-        elif step == 'amount':
-            state['amount'] = text
-            try:
-                amount_value = float(state['amount'].replace(',', '.')) if state['amount'].replace(',', '').replace('.', '').isdigit() else 0
-                row = [
-                    datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    state.get('client', ''),
-                    state.get('nick', ''),
-                    state.get('contact', ''),
-                    state.get('holiday', ''),
-                    state.get('city', ''),
-                    state.get('format', ''),
-                    state.get('status', ''),
-                    state.get('paid', ''),
-                    amount_value
-                ]
-                sheet_orders.append_row(row)
-                await update.message.reply_text("✅ *Заказ успешно добавлен!*", parse_mode="Markdown")
-                await context.bot.send_message(ADMIN_CHAT_ID, f"🆕 *Новый заказ* от {state.get('client', 'Неизвестно')} на сумму {state.get('amount', '0')} руб.")
-            except Exception as e:
-                print(f"[ERROR] Ошибка сохранения заказа: {e}")
-                await update.message.reply_text(f"❌ *Ошибка сохранения:* {e}", parse_mode="Markdown")
-            del user_data[chat_id]
-            await update.message.reply_text("Главное меню:", reply_markup=main_keyboard)
-        return  # диалог обработан, выходим
-
-    # ---------- ЕСЛИ НЕТ АКТИВНОГО ДИАЛОГА -> КНОПКИ МЕНЮ ----------
-    if text == "📦 Новый заказ":
-        await new_order(update, context)
-    elif text == "📋 Список заказов":
-        await list_orders(update, context)
-    elif text == "📊 Статистика":
-        await stats(update, context)
-    elif text == "💰 Добавить расход":
-        await update.message.reply_text(
-            "Используйте команду: /add_expense сумма описание\n"
-            "Например: /add_expense 500 Краска"
-        )
-    elif text == "❓ Помощь":
-        await help_command(update, context)
-    else:
-        await update.message.reply_text(
-            "Я не понял команду. Используйте кнопки меню или введите /help для списка команд."
-        )
-
-# ============================================
-#  ОБРАБОТЧИК CALLBACK (для фильтров и пагинации)
-# ============================================
-
-async def filter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    print(f"[LOG] Callback data: {data}")
-
-    if data == "cancel_filter":
-        await query.edit_message_text("❌ Фильтр отменён.", reply_markup=None)
-        return
-
-    if data.startswith("status_"):
-        status = data.split("_", 1)[1]
-        context.user_data['filter'] = ('status', status)
-    elif data.startswith("paid_"):
-        paid = data.split("_", 1)[1]
-        context.user_data['filter'] = ('paid', paid)
-    elif data == "filter_all":
-        context.user_data['filter'] = None
-    elif data.startswith("page_"):
-        page = int(data.split("_")[1])
-        context.user_data['page'] = page
-        await show_orders_page(update, context)
-        return
-    else:
-        return
-
+async def list_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print(f"[LOG] /list_orders от {update.effective_chat.id}")
+    await update.message.reply_text(
+        "🔍 *Выберите фильтр для списка заказов:*",
+        reply_markup=filter_keyboard,
+        parse_mode="Markdown"
+    )
+    context.user_data['filter'] = None
     context.user_data['page'] = 1
-    await show_orders_page(update, context)
 
 async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -415,6 +487,142 @@ async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[ERROR] Ошибка в show_orders_page: {e}")
         await query.edit_message_text(f"❌ *Ошибка:* {e}", parse_mode="Markdown")
 
+async def filter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    print(f"[LOG] Callback data: {data}")
+
+    if data == "cancel_filter":
+        await query.edit_message_text("❌ Фильтр отменён.", reply_markup=None)
+        await query.message.reply_text("Главное меню:", reply_markup=main_keyboard)
+        return
+
+    if data.startswith("status_"):
+        status = data.split("_", 1)[1]
+        context.user_data['filter'] = ('status', status)
+    elif data.startswith("paid_"):
+        paid = data.split("_", 1)[1]
+        context.user_data['filter'] = ('paid', paid)
+    elif data == "filter_all":
+        context.user_data['filter'] = None
+    elif data.startswith("page_"):
+        page = int(data.split("_")[1])
+        context.user_data['page'] = page
+        await show_orders_page(update, context)
+        return
+    else:
+        return
+
+    context.user_data['page'] = 1
+    await show_orders_page(update, context)
+
+# ============================================
+#  ОСНОВНОЙ ОБРАБОТЧИК ТЕКСТА (диалоги + кнопки)
+# ============================================
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Игнорируем команды с /
+    if update.message and update.message.text and update.message.text.startswith('/'):
+        return
+
+    chat_id = update.effective_chat.id
+    text = update.message.text
+
+    # Обработка кнопки "Отмена"
+    if text == "🔙 Отмена":
+        if chat_id in user_data:
+            del user_data[chat_id]
+            await update.message.reply_text("❌ Действие отменено. Возврат в главное меню.", reply_markup=main_keyboard)
+        else:
+            await update.message.reply_text("Нет активного действия для отмены.", reply_markup=main_keyboard)
+        return
+
+    # ---------- ЕСЛИ ЕСТЬ АКТИВНЫЙ ДИАЛОГ ----------
+    if chat_id in user_data:
+        state = user_data[chat_id]
+        step = state['step']
+        print(f"[LOG] Диалог шаг {step}, текст: {text}")
+
+        if step == 'client':
+            state['client'] = text
+            state['step'] = 'nick'
+            await update.message.reply_text("📝 Введите *ник* (Telegram/Instagram):", parse_mode="Markdown", reply_markup=dialog_keyboard)
+        elif step == 'nick':
+            state['nick'] = text
+            state['step'] = 'contact'
+            await update.message.reply_text("📝 *Способ связи* (Инст, ТГ, Макс):", parse_mode="Markdown", reply_markup=dialog_keyboard)
+        elif step == 'contact':
+            state['contact'] = text
+            state['step'] = 'holiday'
+            await update.message.reply_text("📝 *Дата праздника* (в формате ДД.ММ.ГГГГ):", parse_mode="Markdown", reply_markup=dialog_keyboard)
+        elif step == 'holiday':
+            state['holiday'] = text
+            state['step'] = 'city'
+            await update.message.reply_text("📝 *Город* (Москва, СПб, другой):", parse_mode="Markdown", reply_markup=dialog_keyboard)
+        elif step == 'city':
+            state['city'] = text
+            state['step'] = 'format'
+            await update.message.reply_text("📝 *Формат* (полный, электронная, самовывоз):", parse_mode="Markdown", reply_markup=dialog_keyboard)
+        elif step == 'format':
+            state['format'] = text
+            state['step'] = 'status'
+            await update.message.reply_text("📝 *Статус* (переговорка, дизайн, печать, отправлено):", parse_mode="Markdown", reply_markup=dialog_keyboard)
+        elif step == 'status':
+            state['status'] = text
+            state['step'] = 'paid'
+            await update.message.reply_text("📝 *Оплачено?* (Да / Нет):", parse_mode="Markdown", reply_markup=dialog_keyboard)
+        elif step == 'paid':
+            state['paid'] = text
+            state['step'] = 'amount'
+            await update.message.reply_text("📝 *Сумма* (1800, 1500 или своя):", parse_mode="Markdown", reply_markup=dialog_keyboard)
+        elif step == 'amount':
+            state['amount'] = text
+            try:
+                amount_value = float(state['amount'].replace(',', '.')) if state['amount'].replace(',', '').replace('.', '').isdigit() else 0
+                row = [
+                    datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    state.get('client', ''),
+                    state.get('nick', ''),
+                    state.get('contact', ''),
+                    state.get('holiday', ''),
+                    state.get('city', ''),
+                    state.get('format', ''),
+                    state.get('status', ''),
+                    state.get('paid', ''),
+                    amount_value
+                ]
+                sheet_orders.append_row(row)
+                await update.message.reply_text("✅ *Заказ успешно добавлен!*", parse_mode="Markdown", reply_markup=main_keyboard)
+                await context.bot.send_message(ADMIN_CHAT_ID, f"🆕 *Новый заказ* от {state.get('client', 'Неизвестно')} на сумму {state.get('amount', '0')} руб.")
+            except Exception as e:
+                print(f"[ERROR] Ошибка сохранения заказа: {e}")
+                await update.message.reply_text(f"❌ *Ошибка сохранения:* {e}", parse_mode="Markdown", reply_markup=main_keyboard)
+            del user_data[chat_id]
+            await update.message.reply_text("Главное меню:", reply_markup=main_keyboard)
+        return  # диалог обработан, выходим
+
+    # ---------- ЕСЛИ НЕТ АКТИВНОГО ДИАЛОГА -> КНОПКИ МЕНЮ ----------
+    if text == "📦 Новый заказ":
+        await new_order(update, context)
+    elif text == "📋 Список заказов":
+        await list_orders(update, context)
+    elif text == "📊 Статистика":
+        await stats(update, context)
+    elif text == "💰 Добавить расход":
+        await update.message.reply_text(
+            "Используйте команду: /add_expense сумма описание\n"
+            "Например: /add_expense 500 Краска",
+            reply_markup=main_keyboard
+        )
+    elif text == "❓ Помощь":
+        await help_command(update, context)
+    else:
+        await update.message.reply_text(
+            "Я не понял команду. Используйте кнопки меню или введите /help для списка команд.",
+            reply_markup=main_keyboard
+        )
+
 # ============================================
 #  РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ
 # ============================================
@@ -425,11 +633,16 @@ app.add_handler(CommandHandler('test', test_command))
 app.add_handler(CommandHandler('status', status_command))
 app.add_handler(CommandHandler('new_order', new_order))
 app.add_handler(CommandHandler('list_orders', list_orders))
+app.add_handler(CommandHandler('view', view_order))
+app.add_handler(CommandHandler('delete', delete_order))
+app.add_handler(CommandHandler('export', export_csv))
+app.add_handler(CommandHandler('stats_date', stats_date))
 app.add_handler(CommandHandler('update_status', update_status))
 app.add_handler(CommandHandler('stats', stats))
 app.add_handler(CommandHandler('add_expense', add_expense))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 app.add_handler(CallbackQueryHandler(filter_callback))
+app.add_handler(CallbackQueryHandler(delete_callback, pattern='^(confirm_delete|cancel_delete)$'))
 
 # ============================================
 #  ВЕБХУК НА AIOHTTP
