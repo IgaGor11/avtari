@@ -1,0 +1,17 @@
+﻿services:
+  - type: web
+    name: avtari-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: SPREADSHEET_ID
+        sync: false
+      - key: ADMIN_CHAT_ID
+        sync: false
+      - key: SHEET_ORDERS
+        sync: false
+      - key: SHEET_EXPENSES
+        sync: false
