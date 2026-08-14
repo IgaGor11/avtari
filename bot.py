@@ -2,6 +2,7 @@ import os
 import datetime
 import json
 import asyncio
+import traceback
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from flask import Flask, request, Response
@@ -9,29 +10,41 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
 # ============================================
-#  КОНФИГУРАЦИЯ (переменные окружения)
+#  КОНФИГУРАЦИЯ
 # ============================================
 
-BOT_TOKEN = os.environ['BOT_TOKEN']
-SPREADSHEET_ID = os.environ['SPREADSHEET_ID']
-ADMIN_CHAT_ID = int(os.environ['ADMIN_CHAT_ID'])
+BOT_TOKEN = os.environ.get('BOT_TOKEN')
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN not set in environment")
+
+SPREADSHEET_ID = os.environ.get('SPREADSHEET_ID')
+if not SPREADSHEET_ID:
+    raise RuntimeError("SPREADSHEET_ID not set in environment")
+
+ADMIN_CHAT_ID = int(os.environ.get('ADMIN_CHAT_ID', 0))
+if ADMIN_CHAT_ID == 0:
+    raise RuntimeError("ADMIN_CHAT_ID not set in environment")
+
 SHEET_ORDERS = os.environ.get('SHEET_ORDERS', 'Заказы')
 SHEET_EXPENSES = os.environ.get('SHEET_EXPENSES', 'Расходы')
 
-# Подключение к Google Sheets (один раз при старте)
+# Подключение к Google Sheets
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-client = gspread.authorize(creds)
-sheet_orders = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_ORDERS)
-sheet_expenses = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_EXPENSES)
+try:
+    creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+    client = gspread.authorize(creds)
+    sheet_orders = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_ORDERS)
+    sheet_expenses = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_EXPENSES)
+    print("✅ Connected to Google Sheets")
+except Exception as e:
+    print(f"❌ Google Sheets connection error: {e}")
+    # Не падаем, чтобы бот мог хотя бы отвечать на /start, но список и статистика не будут работать
 
 # ============================================
 #  СОЗДАНИЕ ПРИЛОЖЕНИЯ TELEGRAM
 # ============================================
 
 app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-# Хранилище состояний диалогов (в памяти)
 user_data = {}
 
 # ============================================
@@ -205,6 +218,9 @@ async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     filter_type = context.user_data.get('filter')
 
     try:
+        if not sheet_orders:
+            await query.edit_message_text("❌ *Ошибка подключения к Google Sheets.*", parse_mode="Markdown")
+            return
         records = sheet_orders.get_all_values()
         if len(records) <= 1:
             await query.edit_message_text("📭 *Заказов пока нет.*", parse_mode="Markdown")
@@ -257,6 +273,9 @@ async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
+        if not sheet_orders or not sheet_expenses:
+            await update.message.reply_text("❌ *Ошибка подключения к Google Sheets.*", parse_mode="Markdown")
+            return
         orders = sheet_orders.get_all_values()
         expenses = sheet_expenses.get_all_values()
         total_revenue = 0
@@ -341,7 +360,7 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 app.add_handler(CallbackQueryHandler(filter_callback))
 
 # ============================================
-#  FLASK-ПРИЛОЖЕНИЕ ДЛЯ ВЕБХУКА (с поддержкой async)
+#  FLASK-ПРИЛОЖЕНИЕ
 # ============================================
 
 flask_app = Flask(__name__)
@@ -351,34 +370,33 @@ def index():
     return "Bot is running!", 200
 
 @flask_app.route('/webhook', methods=['POST'])
-async def webhook():
+def webhook():
     try:
-        if request.headers.get('content-type') == 'application/json':
-            json_data = request.get_json()
-            if not json_data:
-                return Response('Invalid JSON', status=400)
-            update = Update.de_json(json_data, app.bot)
-            await app.process_update(update)
-            return Response('ok', status=200)
-        else:
-            return Response('Bad Request', status=400)
+        # Логируем входящий запрос
+        print("📥 Webhook POST received")
+        json_data = request.get_json()
+        if not json_data:
+            print("❌ No JSON data")
+            return Response('Invalid JSON', status=400)
+        
+        print(f"📩 Update: {json_data.get('message', {}).get('text', '')[:50]}")
+        
+        # Обновляем update и обрабатываем
+        update = Update.de_json(json_data, app.bot)
+        # Запускаем обработку асинхронно (не ждём)
+        asyncio.run(app.process_update(update))
+        print("✅ Update processed")
+        return Response('ok', status=200)
     except Exception as e:
-        print(f"Webhook error: {e}")
-        return Response('Internal Error', status=500)
+        print(f"❌ Webhook error: {e}")
+        traceback.print_exc()
+        return Response(f'Internal Error: {e}', status=500)
 
 # ============================================
-#  ЗАПУСК (установка вебхука + запуск Flask)
+#  ЗАПУСК
 # ============================================
 
 if __name__ == '__main__':
-    # Устанавливаем вебхук на наш URL
-    async def set_webhook():
-        webhook_url = 'https://avtari.onrender.com/webhook'
-        await app.bot.set_webhook(url=webhook_url)
-        print(f"Webhook установлен на {webhook_url}")
-
-    asyncio.run(set_webhook())
-
-    # Запускаем Flask-сервер на порту 10000 (Render выдаёт его в переменной PORT, но мы используем 10000)
     port = int(os.environ.get('PORT', 10000))
-    flask_app.run(host='0.0.0.0', port=port)
+    print(f"🚀 Starting bot on port {port}")
+    flask_app.run(host='0.0.0.0', port=port, debug=False)
