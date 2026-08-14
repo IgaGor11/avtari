@@ -1,8 +1,6 @@
 import os
 import datetime
-import time
-import threading
-import asyncio
+import json
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from flask import Flask, request, Response
@@ -19,67 +17,18 @@ ADMIN_CHAT_ID = int(os.environ['ADMIN_CHAT_ID'])
 SHEET_ORDERS = os.environ.get('SHEET_ORDERS', 'Заказы')
 SHEET_EXPENSES = os.environ.get('SHEET_EXPENSES', 'Расходы')
 
-# Кэш данных (обновляется раз в 30 секунд)
-cache = {
-    'orders': None,
-    'expenses': None,
-    'last_update': 0
-}
-CACHE_TTL = 30  # секунд
+# Подключение к Google Sheets (один раз)
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+client = gspread.authorize(creds)
+sheet_orders = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_ORDERS)
+sheet_expenses = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_EXPENSES)
 
 # ============================================
-#  ФУНКЦИИ РАБОТЫ С GOOGLE SHEETS (с кэшем)
+#  ИНИЦИАЛИЗАЦИЯ БОТА (через Application)
 # ============================================
 
-def get_sheet_data(sheet_name):
-    """Получает данные из таблицы с кэшированием"""
-    now = time.time()
-    if now - cache['last_update'] < CACHE_TTL:
-        # Возвращаем кэш, если он есть
-        if sheet_name == SHEET_ORDERS and cache['orders'] is not None:
-            return cache['orders']
-        if sheet_name == SHEET_EXPENSES and cache['expenses'] is not None:
-            return cache['expenses']
-
-    # Иначе читаем из таблицы
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-    client = gspread.authorize(creds)
-    sheet = client.open_by_key(SPREADSHEET_ID).worksheet(sheet_name)
-    data = sheet.get_all_values()
-
-    # Обновляем кэш
-    if sheet_name == SHEET_ORDERS:
-        cache['orders'] = data
-    elif sheet_name == SHEET_EXPENSES:
-        cache['expenses'] = data
-    cache['last_update'] = now
-    return data
-
-# ============================================
-#  FLASK-СЕРВЕР ДЛЯ ПИНГА (держим бота активным)
-# ============================================
-
-flask_app = Flask(__name__)
-
-@flask_app.route('/')
-def index():
-    return "Bot is running!", 200
-
-@flask_app.route('/ping')
-def ping():
-    return "Pong!", 200
-
-def run_flask():
-    flask_app.run(host='0.0.0.0', port=10000, threaded=True)
-
-# Запускаем Flask в отдельном потоке
-flask_thread = threading.Thread(target=run_flask, daemon=True)
-flask_thread.start()
-
-# ============================================
-#  ТЕЛЕГРАМ-БОТ
-# ============================================
+app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 user_data = {}
 
@@ -117,7 +66,10 @@ def pagination_keyboard(page, total_pages):
     buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="cancel_filter")])
     return InlineKeyboardMarkup(buttons)
 
-# --- Обработчики ---
+# ============================================
+#  ОБРАБОТЧИКИ КОМАНД
+# ============================================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Привет! Я бот для учёта заказов.\n\n"
@@ -185,11 +137,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state['amount'] = text
         try:
             amount_value = float(state['amount'].replace(',', '.')) if state['amount'].replace(',', '').replace('.', '').isdigit() else 0
-            # Пишем сразу в таблицу (без кэша)
-            scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-            creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-            client = gspread.authorize(creds)
-            sheet = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_ORDERS)
             row = [
                 datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 state.get('client', ''),
@@ -202,9 +149,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 state.get('paid', ''),
                 amount_value
             ]
-            sheet.append_row(row)
-            # Инвалидируем кэш
-            cache['orders'] = None
+            sheet_orders.append_row(row)
             await update.message.reply_text("✅ *Заказ успешно добавлен!*", parse_mode="Markdown")
             await context.bot.send_message(ADMIN_CHAT_ID, f"🆕 *Новый заказ* от {state.get('client', 'Неизвестно')} на сумму {state.get('amount', '0')} руб.")
         except Exception as e:
@@ -255,13 +200,12 @@ async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     filter_type = context.user_data.get('filter')
 
     try:
-        records = get_sheet_data(SHEET_ORDERS)
+        records = sheet_orders.get_all_values()
         if len(records) <= 1:
             await query.edit_message_text("📭 *Заказов пока нет.*", parse_mode="Markdown")
             return
 
         data_rows = records[1:]
-        # Фильтр
         filtered = []
         for row in data_rows:
             if filter_type:
@@ -308,9 +252,8 @@ async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        orders = get_sheet_data(SHEET_ORDERS)
-        expenses = get_sheet_data(SHEET_EXPENSES)
-
+        orders = sheet_orders.get_all_values()
+        expenses = sheet_expenses.get_all_values()
         total_revenue = 0
         paid_count = 0
         status_counts = {}
@@ -354,14 +297,8 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         amount = float(args[0].replace(',', '.'))
         desc = ' '.join(args[1:])
-        # Сразу пишем
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-        client = gspread.authorize(creds)
-        sheet = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_EXPENSES)
         row = [datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), desc, amount]
-        sheet.append_row(row)
-        cache['expenses'] = None
+        sheet_expenses.append_row(row)
         await update.message.reply_text(f"✅ *Расход {amount} руб. добавлен.*", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ *Ошибка:* {e}", parse_mode="Markdown")
@@ -379,29 +316,59 @@ async def update_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_id = int(args[0])
         new_status = ' '.join(args[1:])
         row_num = order_id + 1
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-        client = gspread.authorize(creds)
-        sheet = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_ORDERS)
-        sheet.update_cell(row_num, 8, new_status)
-        cache['orders'] = None
+        sheet_orders.update_cell(row_num, 8, new_status)
         await update.message.reply_text(f"✅ *Статус заказа {order_id} обновлён на '{new_status}'*", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ *Ошибка:* {e}", parse_mode="Markdown")
 
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler('start', start))
-    app.add_handler(CommandHandler('help', help_command))
-    app.add_handler(CommandHandler('new_order', new_order))
-    app.add_handler(CommandHandler('list_orders', list_orders))
-    app.add_handler(CommandHandler('update_status', update_status))
-    app.add_handler(CommandHandler('stats', stats))
-    app.add_handler(CommandHandler('add_expense', add_expense))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(CallbackQueryHandler(filter_callback))
-    print("🚀 Бот запущен и слушает...")
-    app.run_polling()
+# ============================================
+#  НАСТРОЙКА ОБРАБОТЧИКОВ (регистрируем)
+# ============================================
+
+app.add_handler(CommandHandler('start', start))
+app.add_handler(CommandHandler('help', help_command))
+app.add_handler(CommandHandler('new_order', new_order))
+app.add_handler(CommandHandler('list_orders', list_orders))
+app.add_handler(CommandHandler('update_status', update_status))
+app.add_handler(CommandHandler('stats', stats))
+app.add_handler(CommandHandler('add_expense', add_expense))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+app.add_handler(CallbackQueryHandler(filter_callback))
+
+# ============================================
+#  FLASK-ПРИЛОЖЕНИЕ ДЛЯ ВЕБХУКА
+# ============================================
+
+flask_app = Flask(__name__)
+
+@flask_app.route('/', methods=['GET'])
+def index():
+    return "Bot is running!", 200
+
+@flask_app.route('/webhook', methods=['POST'])
+async def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_data = request.get_json()
+        update = Update.de_json(json_data, app.bot)
+        await app.process_update(update)
+        return Response('ok', status=200)
+    else:
+        return Response('Bad Request', status=400)
+
+# ============================================
+#  ЗАПУСК (выполняется только в main)
+# ============================================
 
 if __name__ == '__main__':
-    main()
+    # Устанавливаем вебхук на наш URL
+    # URL будет https://avtari.onrender.com/webhook
+    import asyncio
+    async def set_webhook():
+        webhook_url = 'https://avtari.onrender.com/webhook'
+        await app.bot.set_webhook(url=webhook_url)
+        print(f"Webhook установлен на {webhook_url}")
+
+    asyncio.run(set_webhook())
+
+    # Запускаем Flask-сервер (он будет слушать на порту 10000)
+    flask_app.run(host='0.0.0.0', port=10000)
