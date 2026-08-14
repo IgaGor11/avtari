@@ -1,10 +1,9 @@
 import os
 import datetime
-import json
 import asyncio
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from flask import Flask, request, Response
+from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
@@ -18,7 +17,7 @@ ADMIN_CHAT_ID = int(os.environ['ADMIN_CHAT_ID'])
 SHEET_ORDERS = os.environ.get('SHEET_ORDERS', 'Заказы')
 SHEET_EXPENSES = os.environ.get('SHEET_EXPENSES', 'Расходы')
 
-# Подключение к Google Sheets
+# Подключение к Google Sheets (один раз)
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
 client = gspread.authorize(creds)
@@ -26,18 +25,14 @@ sheet_orders = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_ORDERS)
 sheet_expenses = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_EXPENSES)
 
 # ============================================
-#  ПРИЛОЖЕНИЕ TELEGRAM
+#  БОТ
 # ============================================
 
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# Хранилище состояний диалогов
 user_data = {}
 
-# ============================================
-#  КЛАВИАТУРЫ
-# ============================================
-
+# Клавиатуры
 main_keyboard = ReplyKeyboardMarkup(
     [
         ["📦 Новый заказ", "📋 Список заказов"],
@@ -72,7 +67,7 @@ def pagination_keyboard(page, total_pages):
     return InlineKeyboardMarkup(buttons)
 
 # ============================================
-#  ОБРАБОТЧИКИ КОМАНД (те же)
+#  ОБРАБОТЧИКИ
 # ============================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -341,50 +336,50 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 app.add_handler(CallbackQueryHandler(filter_callback))
 
 # ============================================
-#  FLASK-ПРИЛОЖЕНИЕ (синхронный вебхук)
+#  ВЕБХУК НА AIOHTTP
 # ============================================
 
-flask_app = Flask(__name__)
-
-# Инициализация приложения Telegram (синхронно)
-def init_telegram_app():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(app.initialize())
-    loop.close()
-
-init_telegram_app()
-
-@flask_app.route('/', methods=['GET'])
-def index():
-    return "Bot is running!", 200
-
-@flask_app.route('/webhook', methods=['POST'])
-def webhook():
+async def handle_webhook(request):
     try:
-        if request.headers.get('content-type') == 'application/json':
-            json_data = request.get_json()
-            if not json_data:
-                return Response('Invalid JSON', status=400)
-            update = Update.de_json(json_data, app.bot)
-            # Обработка в синхронном режиме
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(app.process_update(update))
-            loop.close()
-            return Response('ok', status=200)
-        else:
-            return Response('Bad Request', status=400)
+        data = await request.json()
+        if not data:
+            return web.Response(status=400, text='Invalid JSON')
+        update = Update.de_json(data, app.bot)
+        await app.process_update(update)
+        return web.Response(status=200, text='ok')
     except Exception as e:
         print(f"Webhook error: {e}")
         import traceback
         traceback.print_exc()
-        return Response('Internal Error', status=500)
+        return web.Response(status=500, text='Internal Error')
+
+# Создаём aiohttp приложение
+web_app = web.Application()
+web_app.router.add_post('/webhook', handle_webhook)
+web_app.router.add_get('/', lambda request: web.Response(text='Bot is running!'))
 
 # ============================================
 #  ЗАПУСК
 # ============================================
 
-if __name__ == '__main__':
+async def setup_and_run():
+    # Инициализация бота
+    await app.initialize()
+    app._initialized = True
+
+    # Установка вебхука
+    webhook_url = 'https://avtari.onrender.com/webhook'
+    await app.bot.set_webhook(url=webhook_url)
+    print(f"Webhook установлен на {webhook_url}")
+
+    # Запуск aiohttp сервера
+    runner = web.AppRunner(web_app)
+    await runner.setup()
     port = int(os.environ.get('PORT', 10000))
-    flask_app.run(host='0.0.0.0', port=port)
+    site = web.TCPSite(runner, host='0.0.0.0', port=port)
+    await site.start()
+    print(f"Сервер запущен на порту {port}")
+    await asyncio.Event().wait()  # Бесконечное ожидание
+
+if __name__ == '__main__':
+    asyncio.run(setup_and_run())
