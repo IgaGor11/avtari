@@ -1,30 +1,89 @@
 import os
 import datetime
+import time
+import threading
+import asyncio
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from flask import Flask, request, Response
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
-# --- Загрузка переменных окружения ---
+# ============================================
+#  КОНФИГУРАЦИЯ
+# ============================================
+
 BOT_TOKEN = os.environ['BOT_TOKEN']
 SPREADSHEET_ID = os.environ['SPREADSHEET_ID']
 ADMIN_CHAT_ID = int(os.environ['ADMIN_CHAT_ID'])
 SHEET_ORDERS = os.environ.get('SHEET_ORDERS', 'Заказы')
 SHEET_EXPENSES = os.environ.get('SHEET_EXPENSES', 'Расходы')
 
-# --- Подключение к Google Sheets ---
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-client = gspread.authorize(creds)
-sheet_orders = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_ORDERS)
-sheet_expenses = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_EXPENSES)
+# Кэш данных (обновляется раз в 30 секунд)
+cache = {
+    'orders': None,
+    'expenses': None,
+    'last_update': 0
+}
+CACHE_TTL = 30  # секунд
 
-# --- Хранилище диалогов (в памяти) ---
+# ============================================
+#  ФУНКЦИИ РАБОТЫ С GOOGLE SHEETS (с кэшем)
+# ============================================
+
+def get_sheet_data(sheet_name):
+    """Получает данные из таблицы с кэшированием"""
+    now = time.time()
+    if now - cache['last_update'] < CACHE_TTL:
+        # Возвращаем кэш, если он есть
+        if sheet_name == SHEET_ORDERS and cache['orders'] is not None:
+            return cache['orders']
+        if sheet_name == SHEET_EXPENSES and cache['expenses'] is not None:
+            return cache['expenses']
+
+    # Иначе читаем из таблицы
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+    client = gspread.authorize(creds)
+    sheet = client.open_by_key(SPREADSHEET_ID).worksheet(sheet_name)
+    data = sheet.get_all_values()
+
+    # Обновляем кэш
+    if sheet_name == SHEET_ORDERS:
+        cache['orders'] = data
+    elif sheet_name == SHEET_EXPENSES:
+        cache['expenses'] = data
+    cache['last_update'] = now
+    return data
+
+# ============================================
+#  FLASK-СЕРВЕР ДЛЯ ПИНГА (держим бота активным)
+# ============================================
+
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def index():
+    return "Bot is running!", 200
+
+@flask_app.route('/ping')
+def ping():
+    return "Pong!", 200
+
+def run_flask():
+    flask_app.run(host='0.0.0.0', port=10000, threaded=True)
+
+# Запускаем Flask в отдельном потоке
+flask_thread = threading.Thread(target=run_flask, daemon=True)
+flask_thread.start()
+
+# ============================================
+#  ТЕЛЕГРАМ-БОТ
+# ============================================
+
 user_data = {}
 
-# ====================== КЛАВИАТУРЫ ======================
-
-# Главное меню (ReplyKeyboard)
+# Клавиатуры
 main_keyboard = ReplyKeyboardMarkup(
     [
         ["📦 Новый заказ", "📋 Список заказов"],
@@ -34,7 +93,6 @@ main_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# Клавиатура для фильтров (Inline)
 filter_keyboard = InlineKeyboardMarkup([
     [InlineKeyboardButton("📌 Все", callback_data="filter_all")],
     [InlineKeyboardButton("🟢 Переговорка", callback_data="status_переговорка"),
@@ -46,7 +104,6 @@ filter_keyboard = InlineKeyboardMarkup([
     [InlineKeyboardButton("🔙 Отмена", callback_data="cancel_filter")]
 ])
 
-# Клавиатура для пагинации
 def pagination_keyboard(page, total_pages):
     buttons = []
     if total_pages > 1:
@@ -60,8 +117,7 @@ def pagination_keyboard(page, total_pages):
     buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="cancel_filter")])
     return InlineKeyboardMarkup(buttons)
 
-# ====================== ОБРАБОТЧИКИ ======================
-
+# --- Обработчики ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Привет! Я бот для учёта заказов.\n\n"
@@ -80,7 +136,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# --- Добавление заказа (диалог) ---
 async def new_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_data[chat_id] = {'step': 'client'}
@@ -89,7 +144,6 @@ async def new_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if chat_id not in user_data:
-        # Если не в диалоге, просто игнорируем (или можно отправить подсказку)
         return
     state = user_data[chat_id]
     step = state['step']
@@ -131,6 +185,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state['amount'] = text
         try:
             amount_value = float(state['amount'].replace(',', '.')) if state['amount'].replace(',', '').replace('.', '').isdigit() else 0
+            # Пишем сразу в таблицу (без кэша)
+            scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+            creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+            client = gspread.authorize(creds)
+            sheet = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_ORDERS)
             row = [
                 datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 state.get('client', ''),
@@ -143,24 +202,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 state.get('paid', ''),
                 amount_value
             ]
-            sheet_orders.append_row(row)
+            sheet.append_row(row)
+            # Инвалидируем кэш
+            cache['orders'] = None
             await update.message.reply_text("✅ *Заказ успешно добавлен!*", parse_mode="Markdown")
             await context.bot.send_message(ADMIN_CHAT_ID, f"🆕 *Новый заказ* от {state.get('client', 'Неизвестно')} на сумму {state.get('amount', '0')} руб.")
         except Exception as e:
             await update.message.reply_text(f"❌ *Ошибка сохранения:* {e}", parse_mode="Markdown")
-        # Очищаем диалог
         del user_data[chat_id]
-        # Возвращаем главное меню
         await update.message.reply_text("Главное меню:", reply_markup=main_keyboard)
 
-# --- Список заказов с фильтрацией ---
 async def list_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔍 *Выберите фильтр для списка заказов:*",
         reply_markup=filter_keyboard,
         parse_mode="Markdown"
     )
-    # Сохраняем состояние для фильтрации
     context.user_data['filter'] = None
     context.user_data['page'] = 1
 
@@ -189,7 +246,6 @@ async def filter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         return
 
-    # Сброс страницы на 1 при новом фильтре
     context.user_data['page'] = 1
     await show_orders_page(update, context)
 
@@ -199,26 +255,21 @@ async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     filter_type = context.user_data.get('filter')
 
     try:
-        records = sheet_orders.get_all_values()
+        records = get_sheet_data(SHEET_ORDERS)
         if len(records) <= 1:
             await query.edit_message_text("📭 *Заказов пока нет.*", parse_mode="Markdown")
             return
 
-        # Заголовки: Дата, Клиент, Ник, Способ связи, Дата праздника, Город, Формат, Статус, Оплачено, Сумма
-        headers = records[0]
         data_rows = records[1:]
-
-        # Применяем фильтр
+        # Фильтр
         filtered = []
         for row in data_rows:
             if filter_type:
                 key, value = filter_type
                 if key == 'status':
-                    # статус находится в колонке 7 (индекс 7)
                     if len(row) > 7 and row[7].lower() == value.lower():
                         filtered.append(row)
                 elif key == 'paid':
-                    # оплата в колонке 8
                     if len(row) > 8 and row[8].lower() == value.lower():
                         filtered.append(row)
             else:
@@ -228,17 +279,14 @@ async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("📭 *Нет заказов, соответствующих фильтру.*", parse_mode="Markdown")
             return
 
-        # Пагинация (по 5 на страницу)
         total = len(filtered)
         total_pages = (total + 4) // 5
         start = (page - 1) * 5
         end = min(start + 5, total)
         page_rows = filtered[start:end]
 
-        # Формируем красивое сообщение
         msg = f"📋 *Список заказов* (стр. {page}/{total_pages})\n\n"
         for idx, row in enumerate(page_rows, start=start+1):
-            # row: [Дата, Клиент, Ник, Контакт, Праздник, Город, Формат, Статус, Оплачено, Сумма]
             status_emoji = {
                 "переговорка": "🟢",
                 "дизайн": "🟡",
@@ -252,17 +300,17 @@ async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += f"   💸 Сумма: {row[9]} руб.\n"
             msg += f"   📅 Праздник: {row[4]}\n\n"
 
-        # Клавиатура пагинации и назад
         keyboard = pagination_keyboard(page, total_pages)
         await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=keyboard)
 
     except Exception as e:
         await query.edit_message_text(f"❌ *Ошибка:* {e}", parse_mode="Markdown")
 
-# --- Статистика ---
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        orders = sheet_orders.get_all_values()
+        orders = get_sheet_data(SHEET_ORDERS)
+        expenses = get_sheet_data(SHEET_EXPENSES)
+
         total_revenue = 0
         paid_count = 0
         status_counts = {}
@@ -270,20 +318,16 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(row) > 8 and row[8].lower() == 'да':
                 total_revenue += float(row[9]) if row[9] else 0
                 paid_count += 1
-            # Считаем по статусам
             if len(row) > 7:
                 status = row[7] if row[7] else "Не указан"
                 status_counts[status] = status_counts.get(status, 0) + 1
 
-        expenses = sheet_expenses.get_all_values()
         total_expenses = 0
         for row in expenses[1:]:
             if len(row) > 2 and row[2]:
                 total_expenses += float(row[2]) if row[2] else 0
 
         profit = total_revenue - total_expenses
-
-        # Формируем красивый вывод
         status_lines = "\n".join([f"   • {s}: {c}" for s, c in status_counts.items()])
         msg = (
             f"📊 *СТАТИСТИКА*\n\n"
@@ -298,7 +342,6 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ *Ошибка:* {e}", parse_mode="Markdown")
 
-# --- Добавление расхода ---
 async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         args = context.args
@@ -311,13 +354,18 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         amount = float(args[0].replace(',', '.'))
         desc = ' '.join(args[1:])
+        # Сразу пишем
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+        client = gspread.authorize(creds)
+        sheet = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_EXPENSES)
         row = [datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), desc, amount]
-        sheet_expenses.append_row(row)
+        sheet.append_row(row)
+        cache['expenses'] = None
         await update.message.reply_text(f"✅ *Расход {amount} руб. добавлен.*", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ *Ошибка:* {e}", parse_mode="Markdown")
 
-# --- Обновление статуса (команда) ---
 async def update_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         args = context.args
@@ -331,17 +379,18 @@ async def update_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_id = int(args[0])
         new_status = ' '.join(args[1:])
         row_num = order_id + 1
-        sheet_orders.update_cell(row_num, 8, new_status)
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+        client = gspread.authorize(creds)
+        sheet = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_ORDERS)
+        sheet.update_cell(row_num, 8, new_status)
+        cache['orders'] = None
         await update.message.reply_text(f"✅ *Статус заказа {order_id} обновлён на '{new_status}'*", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ *Ошибка:* {e}", parse_mode="Markdown")
 
-# ====================== ЗАПУСК ======================
-
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    # Команды
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('help', help_command))
     app.add_handler(CommandHandler('new_order', new_order))
@@ -349,14 +398,9 @@ def main():
     app.add_handler(CommandHandler('update_status', update_status))
     app.add_handler(CommandHandler('stats', stats))
     app.add_handler(CommandHandler('add_expense', add_expense))
-
-    # Обработчик текстовых сообщений (для диалога и главного меню)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    # Обработчик callback-запросов (кнопки фильтрации и пагинации)
     app.add_handler(CallbackQueryHandler(filter_callback))
-
-    print("Бот запущен с новым интерфейсом...")
+    print("🚀 Бот запущен и слушает...")
     app.run_polling()
 
 if __name__ == '__main__':
