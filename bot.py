@@ -31,6 +31,22 @@ app = ApplicationBuilder().token(BOT_TOKEN).build()
 user_data = {}
 
 # ============================================
+#  ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК (перенесён наверх)
+# ============================================
+
+async def error_handler(update, context):
+    print(f"[ERROR] {context.error}")
+    traceback.print_exception(type(context.error), context.error, context.error.__traceback__)
+    try:
+        if update and update.effective_message:
+            await update.effective_message.reply_text(
+                "❌ Произошла ошибка. Администратор уведомлён.",
+                reply_markup=main_keyboard
+            )
+    except:
+        pass
+
+# ============================================
 #  КЛАВИАТУРЫ
 # ============================================
 
@@ -93,55 +109,27 @@ paid_keyboard = InlineKeyboardMarkup([
 # ============================================
 
 def parse_quick_order(text):
-    """Парсит текст, отправленный одним сообщением, по шаблону."""
     lines = [line.strip() for line in text.split('\n') if line.strip()]
     if len(lines) < 7:
         raise ValueError("Недостаточно строк. Нужно минимум 7 строк с данными.")
-
-    # Порядок строк:
-    # 1) имя, ник, способ связи
-    # 2) город, дата
-    # 3) формат
-    # 4) спец условия
-    # 5) статус
-    # 6) оплачено
-    # 7) сумма
-
     try:
-        # Строка 1: разбираем имя, ник, способ
         parts1 = lines[0].split()
         if len(parts1) < 3:
             raise ValueError("В первой строке должны быть: имя, ник, способ связи через пробел.")
         client = parts1[0]
         nick = parts1[1]
         contact = parts1[2]
-
-        # Строка 2: город и дата (разделитель запятая)
         city_date = lines[1].split(',')
         if len(city_date) < 2:
             raise ValueError("Во второй строке город и дата должны быть через запятую.")
         city = city_date[0].strip()
         holiday = city_date[1].strip()
-
-        # Строка 3: формат
         format_type = lines[2]
-
-        # Строка 4: спец условия
         special = lines[3]
-
-        # Строка 5: статус
         status = lines[4]
-
-        # Строка 6: оплачено
         paid = lines[5]
-
-        # Строка 7: сумма
         amount_str = lines[6].replace(',', '.').strip()
-        try:
-            amount = float(amount_str)
-        except:
-            amount = 0.0
-
+        amount = float(amount_str) if amount_str else 0.0
         return {
             'client': client,
             'nick': nick,
@@ -415,7 +403,6 @@ async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += f"{status_emoji} *{idx}.* {row[1]} ({row[2]})\n"
             msg += f"   Статус: {row[7]} | Оплата: {row[8]} | Сумма: {row[9]} руб.\n\n"
 
-        # Клавиатура с кнопками для каждого заказа
         keyboard_buttons = []
         for idx, row in page_items:
             row_buttons = [
@@ -424,7 +411,6 @@ async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             keyboard_buttons.append(row_buttons)
 
-        # Кнопки пагинации
         nav_row = []
         if page > 1:
             nav_row.append(InlineKeyboardButton("◀️", callback_data=f"page_{page-1}"))
@@ -708,14 +694,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ---------- БЫСТРЫЙ ЗАКАЗ (автоматическое распознавание) ----------
-    # Если сообщение содержит более 3 строк и похоже на шаблон, пробуем распарсить
     lines = [line.strip() for line in text.split('\n') if line.strip()]
     if len(lines) >= 7:
         try:
             parsed = parse_quick_order(text)
-            # Проверяем, что есть имя и сумма
             if parsed['client'] and parsed['amount'] is not None:
-                # Сохраняем в таблицу
                 row = [
                     datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     parsed['client'],
@@ -738,7 +721,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🆕 Быстрый заказ от {parsed['client']} на сумму {parsed['amount']} руб.")
                 return
         except Exception as e:
-            # Если парсинг не удался, сообщим об ошибке и предложим шаблон
             await update.message.reply_text(
                 f"❌ Не удалось распознать заказ: {e}\n\n"
                 "Пожалуйста, проверьте формат и попробуйте снова.\n"
@@ -763,7 +745,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "❓ Помощь":
         await help_command(update, context)
     else:
-        # Если текст не подошел ни под что, подсказываем
         await update.message.reply_text(
             "Я не понял. Используйте кнопки меню или введите /help.\n"
             "Для быстрого заказа отправьте данные в 7 строк по шаблону.",
@@ -771,7 +752,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # ============================================
-#  РЕГИСТРАЦИЯ
+#  РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ
 # ============================================
 
 app.add_handler(CommandHandler('start', start))
@@ -790,23 +771,11 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 app.add_handler(CallbackQueryHandler(filter_callback, pattern='^(filter_|page_|status_|paid_|cancel_filter)'))
 app.add_handler(CallbackQueryHandler(edit_callback, pattern='^(edit_|set_|delete_order_|cancel_edit)'))
 app.add_handler(CallbackQueryHandler(delete_callback, pattern='^(confirm_delete|cancel_delete)'))
-app.add_error_handler(error_handler)
+app.add_error_handler(error_handler)  # теперь error_handler определён выше
 
 # ============================================
-#  ВЕБХУК
+#  ВЕБХУК НА AIOHTTP
 # ============================================
-
-async def error_handler(update, context):
-    print(f"[ERROR] {context.error}")
-    traceback.print_exception(type(context.error), context.error, context.error.__traceback__)
-    try:
-        if update and update.effective_message:
-            await update.effective_message.reply_text(
-                "❌ Произошла ошибка. Администратор уведомлён.",
-                reply_markup=main_keyboard
-            )
-    except:
-        pass
 
 async def handle_webhook(request):
     try:
@@ -824,6 +793,10 @@ async def handle_webhook(request):
 web_app = web.Application()
 web_app.router.add_post('/webhook', handle_webhook)
 web_app.router.add_get('/', lambda request: web.Response(text='Bot is running!'))
+
+# ============================================
+#  ЗАПУСК
+# ============================================
 
 async def setup_and_run():
     await app.initialize()
