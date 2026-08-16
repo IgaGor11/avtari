@@ -3,6 +3,7 @@ import datetime
 import asyncio
 import csv
 import io
+import re
 import gspread
 import traceback
 from oauth2client.service_account import ServiceAccountCredentials
@@ -35,9 +36,10 @@ user_data = {}
 
 main_keyboard = ReplyKeyboardMarkup(
     [
-        ["📦 Новый заказ", "📋 Список заказов"],
-        ["📊 Статистика", "💰 Добавить расход"],
-        ["🔍 Поиск", "❓ Помощь"]
+        ["📦 Пошаговый заказ", "⚡ Быстрый заказ"],
+        ["📋 Список заказов", "📊 Статистика"],
+        ["💰 Добавить расход", "🔍 Поиск"],
+        ["❓ Помощь"]
     ],
     resize_keyboard=True
 )
@@ -87,35 +89,92 @@ paid_keyboard = InlineKeyboardMarkup([
 ])
 
 # ============================================
-#  ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК
+#  ПАРСИНГ БЫСТРОГО ЗАКАЗА
 # ============================================
 
-async def error_handler(update, context):
-    print(f"[ERROR] {context.error}")
-    traceback.print_exception(type(context.error), context.error, context.error.__traceback__)
+def parse_quick_order(text):
+    """Парсит текст, отправленный одним сообщением, по шаблону."""
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    if len(lines) < 7:
+        raise ValueError("Недостаточно строк. Нужно минимум 7 строк с данными.")
+
+    # Порядок строк:
+    # 1) имя, ник, способ связи
+    # 2) город, дата
+    # 3) формат
+    # 4) спец условия
+    # 5) статус
+    # 6) оплачено
+    # 7) сумма
+
     try:
-        if update and update.effective_message:
-            await update.effective_message.reply_text(
-                "❌ Произошла ошибка. Администратор уведомлён.",
-                reply_markup=main_keyboard
-            )
-    except:
-        pass
+        # Строка 1: разбираем имя, ник, способ
+        parts1 = lines[0].split()
+        if len(parts1) < 3:
+            raise ValueError("В первой строке должны быть: имя, ник, способ связи через пробел.")
+        client = parts1[0]
+        nick = parts1[1]
+        contact = parts1[2]
+
+        # Строка 2: город и дата (разделитель запятая)
+        city_date = lines[1].split(',')
+        if len(city_date) < 2:
+            raise ValueError("Во второй строке город и дата должны быть через запятую.")
+        city = city_date[0].strip()
+        holiday = city_date[1].strip()
+
+        # Строка 3: формат
+        format_type = lines[2]
+
+        # Строка 4: спец условия
+        special = lines[3]
+
+        # Строка 5: статус
+        status = lines[4]
+
+        # Строка 6: оплачено
+        paid = lines[5]
+
+        # Строка 7: сумма
+        amount_str = lines[6].replace(',', '.').strip()
+        try:
+            amount = float(amount_str)
+        except:
+            amount = 0.0
+
+        return {
+            'client': client,
+            'nick': nick,
+            'contact': contact,
+            'city': city,
+            'holiday': holiday,
+            'format': format_type,
+            'special': special,
+            'status': status,
+            'paid': paid,
+            'amount': amount
+        }
+    except IndexError:
+        raise ValueError("Не хватает данных. Проверьте, что вы заполнили все 7 строк.")
+    except Exception as e:
+        raise ValueError(f"Ошибка парсинга: {e}")
 
 # ============================================
-#  КОМАНДЫ
+#  ОБРАБОТЧИКИ КОМАНД
 # ============================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Привет! Я бот для учёта заказов.\n\nВыберите действие из меню ниже 👇",
+        "👋 Привет! Я бот для учёта заказов.\n\n"
+        "Выберите действие из меню 👇",
         reply_markup=main_keyboard
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "📌 Доступные действия:\n\n"
-        "• /new_order – добавить заказ\n"
+        "• /new_order – пошаговое создание заказа\n"
+        "• /quick – быстрый заказ одним сообщением (см. шаблон)\n"
         "• /list_orders – список заказов (с фильтрами)\n"
         "• /stats – общая статистика\n"
         "• /stats_date ДД.ММ.ГГГГ-ДД.ММ.ГГГГ – статистика за период\n"
@@ -124,7 +183,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /search имя – поиск заказов по клиенту\n"
         "• /test – проверить работу бота\n"
         "• /status – диагностика\n\n"
-        "Также вы можете использовать кнопки меню."
+        "Используйте кнопки меню для быстрого доступа."
     )
     await update.message.reply_text(msg, reply_markup=main_keyboard)
 
@@ -171,16 +230,38 @@ async def search_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for idx, row in found[:10]:
             msg += f"*{idx}.* {row[1]} – {row[7]} – {row[9]} руб.\n"
         if len(found) > 10:
-            msg += f"\n... и ещё {len(found)-10} заказов. Используйте список для управления."
+            msg += f"\n... и ещё {len(found)-10} заказов."
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=main_keyboard)
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=main_keyboard)
 
-# ----- Новый заказ (диалог) -----
+# ----- Пошаговый заказ (диалог) -----
 async def new_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_data[chat_id] = {'step': 'client'}
     await update.message.reply_text("📝 Введите имя клиента:", reply_markup=dialog_keyboard)
+
+# ----- Быстрый заказ (шаблон) -----
+async def quick_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    template = (
+        "📝 *Отправьте одним сообщением данные заказа в таком порядке:*\n\n"
+        "1) имя, ник, способ связи (инст/тг/макс)\n"
+        "2) город, дата праздника (ДД.ММ.ГГГГ или текст)\n"
+        "3) формат (печать / электронная)\n"
+        "4) спец условия (самовывоз из типографии / самовывоз зил и т.п.)\n"
+        "5) статус (дизайн / печать / отправлено)\n"
+        "6) оплачено (Да / Нет)\n"
+        "7) сумма (число)\n\n"
+        "*Пример:*\n"
+        "Елена @cikovskay тг\n"
+        "Москва, 21 августа\n"
+        "Печать\n"
+        "Самовывоз зил\n"
+        "Дизайн\n"
+        "Оплачено\n"
+        "1800"
+    )
+    await update.message.reply_text(template, parse_mode="Markdown", reply_markup=main_keyboard)
 
 # ----- Список заказов (вызов фильтров) -----
 async def list_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -286,7 +367,7 @@ async def export_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #  ОТОБРАЖЕНИЕ СПИСКА ЗАКАЗОВ С КНОПКАМИ
 # ============================================
 
-async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE, edit_mode=False):
+async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     page = context.user_data.get('page', 1)
     filter_type = context.user_data.get('filter')
@@ -322,7 +403,6 @@ async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE, e
         end = min(start + 5, total)
         page_items = filtered[start:end]
 
-        # Формируем текст списка
         msg = f"📋 Список заказов (стр. {page}/{total_pages})\n\n"
         for idx, row in page_items:
             status_emoji = {
@@ -335,9 +415,8 @@ async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE, e
             msg += f"{status_emoji} *{idx}.* {row[1]} ({row[2]})\n"
             msg += f"   Статус: {row[7]} | Оплата: {row[8]} | Сумма: {row[9]} руб.\n\n"
 
-        # Строим клавиатуру с кнопками для каждого заказа + пагинация
+        # Клавиатура с кнопками для каждого заказа
         keyboard_buttons = []
-        # Для каждого заказа добавляем строку с кнопками "Редактировать" и "Удалить"
         for idx, row in page_items:
             row_buttons = [
                 InlineKeyboardButton(f"✏️ #{idx}", callback_data=f"edit_order_{idx}"),
@@ -355,7 +434,6 @@ async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE, e
         if nav_row:
             keyboard_buttons.append(nav_row)
 
-        # Кнопка "Назад" для выхода из списка
         keyboard_buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="cancel_filter")])
 
         keyboard = InlineKeyboardMarkup(keyboard_buttons)
@@ -405,14 +483,12 @@ async def edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "cancel_edit":
         await query.edit_message_text("❌ Редактирование отменено.", reply_markup=None)
-        # Возвращаемся в список заказов
         await show_orders_page(update, context)
         return
 
     if data.startswith("edit_order_"):
         order_id = int(data.split("_")[2])
         context.user_data['editing_id'] = order_id
-        # Сохраняем текущий фильтр и страницу для возврата
         context.user_data['return_filter'] = context.user_data.get('filter')
         context.user_data['return_page'] = context.user_data.get('page', 1)
         await query.edit_message_text(
@@ -429,7 +505,6 @@ async def edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif field == "paid":
             await query.edit_message_text("Выберите статус оплаты:", reply_markup=paid_keyboard)
         else:
-            # Для остальных полей просим ввести текст
             await query.edit_message_text(
                 f"📝 Введите новое значение для поля '{field}':",
                 reply_markup=None
@@ -450,7 +525,6 @@ async def edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Ошибка: не найден ID.")
         context.user_data.pop('editing_id', None)
         context.user_data.pop('edit_field', None)
-        # Возврат в список
         await show_orders_page(update, context)
         return
 
@@ -507,7 +581,6 @@ async def delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('delete_id', None)
         context.user_data.pop('delete_row', None)
 
-    # Возврат в список
     await show_orders_page(update, context)
 
 # ============================================
@@ -555,9 +628,7 @@ async def handle_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('waiting_for_edit_input', None)
     context.user_data.pop('edit_field', None)
     context.user_data.pop('editing_id', None)
-    # Возврат в список заказов (на ту же страницу) – но так как мы в текстовом сообщении, мы не можем редактировать то же сообщение,
-    # поэтому просто возвращаем главное меню и предлагаем заново открыть список.
-    await update.message.reply_text("Вернуться в список заказов можно через меню.", reply_markup=main_keyboard)
+    await update.message.reply_text("Главное меню:", reply_markup=main_keyboard)
 
 # ============================================
 #  ОСНОВНОЙ ОБРАБОТЧИК ТЕКСТА
@@ -582,7 +653,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Отменено.", reply_markup=main_keyboard)
         return
 
-    # Диалог создания заказа
+    # Диалог пошагового заказа
     if chat_id in user_data:
         state = user_data[chat_id]
         step = state['step']
@@ -636,9 +707,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del user_data[chat_id]
         return
 
+    # ---------- БЫСТРЫЙ ЗАКАЗ (автоматическое распознавание) ----------
+    # Если сообщение содержит более 3 строк и похоже на шаблон, пробуем распарсить
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    if len(lines) >= 7:
+        try:
+            parsed = parse_quick_order(text)
+            # Проверяем, что есть имя и сумма
+            if parsed['client'] and parsed['amount'] is not None:
+                # Сохраняем в таблицу
+                row = [
+                    datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    parsed['client'],
+                    parsed['nick'],
+                    parsed['contact'],
+                    parsed['holiday'],
+                    parsed['city'],
+                    parsed['format'],
+                    parsed['status'],
+                    parsed['paid'],
+                    parsed['amount']
+                ]
+                sheet_orders.append_row(row)
+                await update.message.reply_text(
+                    f"✅ Заказ от {parsed['client']} успешно добавлен!\n"
+                    f"Сумма: {parsed['amount']} руб.",
+                    reply_markup=main_keyboard
+                )
+                await context.bot.send_message(ADMIN_CHAT_ID,
+                    f"🆕 Быстрый заказ от {parsed['client']} на сумму {parsed['amount']} руб.")
+                return
+        except Exception as e:
+            # Если парсинг не удался, сообщим об ошибке и предложим шаблон
+            await update.message.reply_text(
+                f"❌ Не удалось распознать заказ: {e}\n\n"
+                "Пожалуйста, проверьте формат и попробуйте снова.\n"
+                "Используйте кнопку '⚡ Быстрый заказ' для просмотра шаблона.",
+                reply_markup=main_keyboard
+            )
+            return
+
     # Кнопки главного меню
-    if text == "📦 Новый заказ":
+    if text == "📦 Пошаговый заказ":
         await new_order(update, context)
+    elif text == "⚡ Быстрый заказ":
+        await quick_order(update, context)
     elif text == "📋 Список заказов":
         await list_orders(update, context)
     elif text == "📊 Статистика":
@@ -650,7 +763,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "❓ Помощь":
         await help_command(update, context)
     else:
-        await update.message.reply_text("Не понял. Используйте меню.", reply_markup=main_keyboard)
+        # Если текст не подошел ни под что, подсказываем
+        await update.message.reply_text(
+            "Я не понял. Используйте кнопки меню или введите /help.\n"
+            "Для быстрого заказа отправьте данные в 7 строк по шаблону.",
+            reply_markup=main_keyboard
+        )
 
 # ============================================
 #  РЕГИСТРАЦИЯ
@@ -661,6 +779,7 @@ app.add_handler(CommandHandler('help', help_command))
 app.add_handler(CommandHandler('test', test_command))
 app.add_handler(CommandHandler('status', status_command))
 app.add_handler(CommandHandler('new_order', new_order))
+app.add_handler(CommandHandler('quick', quick_order))
 app.add_handler(CommandHandler('list_orders', list_orders))
 app.add_handler(CommandHandler('stats', stats))
 app.add_handler(CommandHandler('stats_date', stats_date))
@@ -676,6 +795,18 @@ app.add_error_handler(error_handler)
 # ============================================
 #  ВЕБХУК
 # ============================================
+
+async def error_handler(update, context):
+    print(f"[ERROR] {context.error}")
+    traceback.print_exception(type(context.error), context.error, context.error.__traceback__)
+    try:
+        if update and update.effective_message:
+            await update.effective_message.reply_text(
+                "❌ Произошла ошибка. Администратор уведомлён.",
+                reply_markup=main_keyboard
+            )
+    except:
+        pass
 
 async def handle_webhook(request):
     try:
