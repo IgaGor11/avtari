@@ -31,7 +31,7 @@ app = ApplicationBuilder().token(BOT_TOKEN).build()
 user_data = {}
 
 # ============================================
-#  ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК (перенесён наверх)
+#  ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК
 # ============================================
 
 async def error_handler(update, context):
@@ -47,7 +47,7 @@ async def error_handler(update, context):
         pass
 
 # ============================================
-#  КЛАВИАТУРЫ
+#  КЛАВИАТУРЫ (без изменений)
 # ============================================
 
 main_keyboard = ReplyKeyboardMarkup(
@@ -105,7 +105,113 @@ paid_keyboard = InlineKeyboardMarkup([
 ])
 
 # ============================================
-#  ПАРСИНГ БЫСТРОГО ЗАКАЗА
+#  ФУНКЦИЯ НОРМАЛИЗАЦИИ ДАТЫ
+# ============================================
+
+def normalize_date(date_str):
+    """
+    Приводит строку с датой к формату ДД.ММ.ГГГГ.
+    Поддерживает форматы:
+    - 21.08.2026, 21/08/2026, 21-08-2026
+    - 21 августа 2026, 21 авг 2026
+    - August 21, 2026, 21 August 2026
+    - 21.08.26 (двузначный год)
+    - 21 августа (без года) -> подставляется текущий год
+    - сегодня, завтра
+    - месяц число (август 21)
+    Если не удалось распарсить, возвращает исходную строку.
+    """
+    date_str = date_str.strip()
+    if not date_str:
+        return date_str
+
+    # Словари месяцев (русский и английский)
+    months_ru = {
+        'января': 1, 'янв': 1, 'январь': 1,
+        'февраля': 2, 'фев': 2, 'февраль': 2,
+        'марта': 3, 'мар': 3, 'март': 3,
+        'апреля': 4, 'апр': 4, 'апрель': 4,
+        'мая': 5, 'май': 5,
+        'июня': 6, 'июн': 6, 'июнь': 6,
+        'июля': 7, 'июл': 7, 'июль': 7,
+        'августа': 8, 'авг': 8, 'август': 8,
+        'сентября': 9, 'сен': 9, 'сентябрь': 9,
+        'октября': 10, 'окт': 10, 'октябрь': 10,
+        'ноября': 11, 'ноя': 11, 'ноябрь': 11,
+        'декабря': 12, 'дек': 12, 'декабрь': 12
+    }
+    months_en = {
+        'january': 1, 'jan': 1, 'february': 2, 'feb': 2, 'march': 3, 'mar': 3,
+        'april': 4, 'apr': 4, 'may': 5, 'june': 6, 'jun': 6, 'july': 7, 'jul': 7,
+        'august': 8, 'aug': 8, 'september': 9, 'sep': 9, 'october': 10, 'oct': 10,
+        'november': 11, 'nov': 11, 'december': 12, 'dec': 12
+    }
+    months = {**months_ru, **months_en}
+
+    # Обработка специальных слов
+    now = datetime.datetime.now()
+    if date_str.lower() in ['сегодня', 'today']:
+        return now.strftime('%d.%m.%Y')
+    if date_str.lower() in ['завтра', 'tomorrow']:
+        tomorrow = now + datetime.timedelta(days=1)
+        return tomorrow.strftime('%d.%m.%Y')
+
+    # Попробуем распарсить с разделителями . / -
+    separators = ['.', '/', '-']
+    for sep in separators:
+        if sep in date_str:
+            parts = date_str.split(sep)
+            if len(parts) == 3:
+                # Определяем порядок: скорее всего ДД.ММ.ГГГГ или ДД.ММ.ГГ
+                try:
+                    day = int(parts[0])
+                    month = int(parts[1])
+                    year = int(parts[2])
+                    if year < 100:
+                        year += 2000 if year < 30 else 1900  # предположим 2000-2029 -> 2000+, иначе 1900+
+                    if 1 <= day <= 31 and 1 <= month <= 12:
+                        return f"{day:02d}.{month:02d}.{year}"
+                except:
+                    pass
+
+    # Попробуем распарсить словесный формат
+    # Разбиваем на слова и запятые
+    words = re.split(r'[,\s]+', date_str)
+    # Ищем слово месяца
+    month_num = None
+    day = None
+    year = None
+    for i, w in enumerate(words):
+        w_lower = w.lower()
+        if w_lower in months:
+            month_num = months[w_lower]
+            # Ищем число рядом
+            if i > 0 and words[i-1].isdigit():
+                day = int(words[i-1])
+            elif i < len(words)-1 and words[i+1].isdigit():
+                day = int(words[i+1])
+            # Ищем год
+            for j, w2 in enumerate(words):
+                if w2.isdigit() and len(w2) == 4:
+                    year = int(w2)
+                elif w2.isdigit() and len(w2) == 2:
+                    year = 2000 + int(w2) if int(w2) < 30 else 1900 + int(w2)
+            # Если год не найден, берём текущий
+            if year is None:
+                year = now.year
+            # Если нашли день и месяц, формируем дату
+            if day is not None and month_num is not None:
+                try:
+                    dt = datetime.datetime(year, month_num, day)
+                    return dt.strftime('%d.%m.%Y')
+                except:
+                    pass
+
+    # Если ничего не помогло, возвращаем исходную строку
+    return date_str
+
+# ============================================
+#  ПАРСИНГ БЫСТРОГО ЗАКАЗА (с нормализацией даты)
 # ============================================
 
 def parse_quick_order(text):
@@ -123,7 +229,9 @@ def parse_quick_order(text):
         if len(city_date) < 2:
             raise ValueError("Во второй строке город и дата должны быть через запятую.")
         city = city_date[0].strip()
-        holiday = city_date[1].strip()
+        raw_date = city_date[1].strip()
+        # Нормализуем дату
+        holiday = normalize_date(raw_date)
         format_type = lines[2]
         special = lines[3]
         status = lines[4]
@@ -148,7 +256,7 @@ def parse_quick_order(text):
         raise ValueError(f"Ошибка парсинга: {e}")
 
 # ============================================
-#  ОБРАБОТЧИКИ КОМАНД
+#  ОБРАБОТЧИКИ КОМАНД (без изменений, кроме быстрого заказа)
 # ============================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -234,7 +342,7 @@ async def quick_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     template = (
         "📝 *Отправьте одним сообщением данные заказа в таком порядке:*\n\n"
         "1) имя, ник, способ связи (инст/тг/макс)\n"
-        "2) город, дата праздника (ДД.ММ.ГГГГ или текст)\n"
+        "2) город, дата (можно в любом формате, например: 21.08.2026, 21 августа, август 21)\n"
         "3) формат (печать / электронная)\n"
         "4) спец условия (самовывоз из типографии / самовывоз зил и т.п.)\n"
         "5) статус (дизайн / печать / отправлено)\n"
@@ -771,7 +879,7 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 app.add_handler(CallbackQueryHandler(filter_callback, pattern='^(filter_|page_|status_|paid_|cancel_filter)'))
 app.add_handler(CallbackQueryHandler(edit_callback, pattern='^(edit_|set_|delete_order_|cancel_edit)'))
 app.add_handler(CallbackQueryHandler(delete_callback, pattern='^(confirm_delete|cancel_delete)'))
-app.add_error_handler(error_handler)  # теперь error_handler определён выше
+app.add_error_handler(error_handler)
 
 # ============================================
 #  ВЕБХУК НА AIOHTTP
