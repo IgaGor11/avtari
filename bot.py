@@ -52,7 +52,7 @@ async def error_handler(update, context):
         pass
 
 # ============================================
-#  КЛАВИАТУРЫ (обновлены)
+#  КЛАВИАТУРЫ
 # ============================================
 
 main_keyboard = ReplyKeyboardMarkup(
@@ -60,7 +60,7 @@ main_keyboard = ReplyKeyboardMarkup(
         ["📦 Пошаговый заказ", "⚡ Быстрый заказ"],
         ["📋 Список заказов", "📊 Статистика"],
         ["💰 Добавить расход", "🔍 Поиск"],
-        ["📸 Скриншот", "📊 Таблица"],
+        ["📸 Скриншот", "📋 Таблица"],
         ["❓ Помощь"]
     ],
     resize_keyboard=True
@@ -105,13 +105,19 @@ status_keyboard = InlineKeyboardMarkup([
 ])
 
 paid_keyboard = InlineKeyboardMarkup([
-    [InlineKeyboardButton("✅ Да", callback_data="set_paid_да"),
-     InlineKeyboardButton("❌ Нет", callback_data="set_paid_нет")],
+    [InlineKeyboardButton("✅ Оплачено", callback_data="set_paid_оплачено")],
+    [InlineKeyboardButton("❌ Не оплачено", callback_data="set_paid_не оплачено")],
     [InlineKeyboardButton("🔙 Отмена", callback_data="cancel_edit")]
 ])
 
+screenshot_choice_keyboard = InlineKeyboardMarkup([
+    [InlineKeyboardButton("📋 Заказы", callback_data="screenshot_orders"),
+     InlineKeyboardButton("💰 Расходы", callback_data="screenshot_expenses")],
+    [InlineKeyboardButton("🔙 Отмена", callback_data="cancel_screenshot")]
+])
+
 # ============================================
-#  ФУНКЦИЯ НОРМАЛИЗАЦИИ ДАТЫ (без изменений)
+#  ФУНКЦИЯ НОРМАЛИЗАЦИИ ДАТЫ
 # ============================================
 
 def normalize_date(date_str):
@@ -191,7 +197,7 @@ def normalize_date(date_str):
     return date_str
 
 # ============================================
-#  ПАРСИНГ БЫСТРОГО ЗАКАЗА (5 строк)
+#  ПАРСИНГ БЫСТРОГО ЗАКАЗА (5 строк, регистр приводится к нижнему)
 # ============================================
 
 def parse_quick_order(text):
@@ -200,7 +206,6 @@ def parse_quick_order(text):
         raise ValueError("Недостаточно строк. Нужно минимум 5 строк: имя+связь, город+дата, формат, статус, сумма.")
 
     try:
-        # Строка 1: имя, ник (опционально), способ связи
         parts1 = lines[0].split()
         if len(parts1) < 2:
             raise ValueError("В первой строке должны быть: имя и способ связи (минимум 2 слова).")
@@ -213,20 +218,19 @@ def parse_quick_order(text):
             contact = parts1[-1]
             nick = ' '.join(parts1[1:-1]) if len(parts1) > 2 else ''
 
-        # Строка 2: город и дата (можно без запятой)
         city_date = lines[1].split()
         if len(city_date) < 2:
             raise ValueError("Во второй строке должны быть город и дата (минимум 2 слова).")
         if len(city_date) == 2:
-            city = city_date[0]
+            city = city_date[0].lower()
             raw_date = city_date[1]
         else:
-            city = ' '.join(city_date[:-1])
+            city = ' '.join(city_date[:-1]).lower()
             raw_date = city_date[-1]
         holiday = normalize_date(raw_date)
 
-        format_type = lines[2]
-        status = lines[3]
+        format_type = lines[2].lower()
+        status = lines[3].lower()
         amount_str = lines[4].replace(',', '.').strip()
         amount = float(amount_str) if amount_str else 0.0
 
@@ -241,7 +245,7 @@ def parse_quick_order(text):
             'holiday': holiday,
             'format': format_type,
             'status': status,
-            'paid': 'Да',
+            'paid': 'Оплачено',  # всегда оплачено
             'amount': amount
         }
     except IndexError:
@@ -250,37 +254,50 @@ def parse_quick_order(text):
         raise ValueError(f"Ошибка парсинга: {e}")
 
 # ============================================
-#  ФУНКЦИЯ ГЕНЕРАЦИИ СКРИНШОТА ТАБЛИЦЫ
+#  ФУНКЦИЯ ГЕНЕРАЦИИ СКРИНШОТА (универсальная)
 # ============================================
 
-def generate_screenshot():
-    """Генерирует изображение с последними 10 заказами и возвращает путь к файлу."""
+def generate_screenshot(sheet_type='orders'):
+    """Генерирует изображение с последними 10 записями из таблицы Заказы или Расходы."""
     try:
-        records = sheet_orders.get_all_values()
+        if sheet_type == 'orders':
+            sheet = sheet_orders
+            title = "Заказы"
+        else:
+            sheet = sheet_expenses
+            title = "Расходы"
+
+        records = sheet.get_all_values()
         if len(records) <= 1:
-            return None  # нет данных
+            return None
 
         headers = records[0]
-        data = records[1:11]  # последние 10 записей (или все, если меньше)
+        data = records[1:11]  # последние 10 записей
 
-        # Создаём фигуру
-        fig, ax = plt.subplots(figsize=(12, 0.5 + 0.5 * len(data)))
+        # Определяем ширину колонок
+        if sheet_type == 'orders':
+            col_widths = [0.08, 0.12, 0.1, 0.1, 0.12, 0.08, 0.1, 0.12, 0.08, 0.08]
+        else:
+            col_widths = [0.2, 0.5, 0.3]  # Дата, Описание, Сумма
+
+        fig_width = 12 if sheet_type == 'orders' else 10
+        fig, ax = plt.subplots(figsize=(fig_width, 0.5 + 0.5 * len(data)))
         ax.axis('tight')
         ax.axis('off')
+        ax.set_title(f"📊 {title} (последние 10)", fontsize=14, weight='bold')
 
         # Формируем таблицу
         table_data = []
-        table_data.append(headers[:10])  # берём только нужные колонки
+        table_data.append(headers[:10 if sheet_type == 'orders' else 3])
         for row in data:
-            table_data.append(row[:10])
+            table_data.append(row[:10 if sheet_type == 'orders' else 3])
 
-        # Создаём таблицу
-        table = ax.table(cellText=table_data, loc='center', cellLoc='left', colWidths=[0.08, 0.12, 0.1, 0.1, 0.12, 0.08, 0.1, 0.12, 0.08, 0.08])
+        table = ax.table(cellText=table_data, loc='center', cellLoc='left',
+                         colWidths=col_widths[:len(table_data[0])])
         table.auto_set_font_size(False)
         table.set_fontsize(9)
         table.scale(1.2, 1.5)
 
-        # Стилизация
         for (i, j), cell in table.get_cell_dict().items():
             if i == 0:
                 cell.set_facecolor('#4CAF50')
@@ -289,7 +306,6 @@ def generate_screenshot():
                 cell.set_facecolor('#f9f9f9' if i % 2 == 0 else '#e8f5e9')
             cell.set_edgecolor('#cccccc')
 
-        # Сохраняем в временный файл
         with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
             plt.savefig(tmp.name, bbox_inches='tight', dpi=150, facecolor='white')
             return tmp.name
@@ -298,7 +314,262 @@ def generate_screenshot():
         return None
 
 # ============================================
-#  НОВЫЙ ОБРАБОТЧИК ПОИСКА (диалог)
+#  ОБРАБОТЧИКИ КОМАНД
+# ============================================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Привет! Я бот для учёта заказов.\n\n"
+        "Выберите действие из меню 👇",
+        reply_markup=main_keyboard
+    )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = (
+        "📌 *Доступные действия:*\n\n"
+        "• /new_order – пошаговое создание заказа\n"
+        "• /quick – быстрый заказ одним сообщением (см. шаблон)\n"
+        "• /list_orders – список заказов (с фильтрами)\n"
+        "• /stats – общая статистика\n"
+        "• /stats_date ДД.ММ.ГГГГ-ДД.ММ.ГГГГ – статистика за период\n"
+        "• /add_expense – добавить расход (диалог)\n"
+        "• /export – экспорт всех заказов в CSV\n"
+        "• /search – поиск по имени (интерактивный)\n"
+        "• /screenshot – скриншот таблицы (выбор таблицы)\n"
+        "• /table – получить ссылку на таблицу\n"
+        "• /test – проверить работу бота\n"
+        "• /status – диагностика\n\n"
+        "Используйте кнопки меню для быстрого доступа."
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=main_keyboard)
+
+async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ Бот работает!", reply_markup=main_keyboard)
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        orders_count = len(sheet_orders.get_all_values()) - 1
+        expenses_count = len(sheet_expenses.get_all_values()) - 1
+        webhook_info = await app.bot.get_webhook_info()
+        webhook_url = webhook_info.url if webhook_info else "не установлен"
+        pending = webhook_info.pending_update_count if webhook_info else 0
+        msg = (
+            "🔍 *Диагностика:*\n"
+            f"• Заказов: {orders_count}\n"
+            f"• Расходов: {expenses_count}\n"
+            f"• Вебхук: {webhook_url}\n"
+            f"• Ожидающих обновлений: {pending}"
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=main_keyboard)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=main_keyboard)
+
+# ---------- Пошаговый заказ ----------
+async def new_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_data[chat_id] = {'step': 'client'}
+    await update.message.reply_text("📝 Введите имя клиента:", reply_markup=dialog_keyboard)
+
+# ---------- Быстрый заказ (шаблон) ----------
+async def quick_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    template = (
+        "📝 *Отправьте одним сообщением данные заказа в 5 строках:*\n\n"
+        "1) имя, ник (опционально), способ связи\n"
+        "2) город, дата (можно без запятой)\n"
+        "3) формат (печать / электронная)\n"
+        "4) статус (дизайн / печать / отправлено)\n"
+        "5) сумма (число)\n\n"
+        "*Примеры:*\n"
+        "Елена @cikovskay тг\n"
+        "Москва 21 августа\n"
+        "Печать\n"
+        "Дизайн\n"
+        "1800\n\n"
+        "Или без ника:\n"
+        "Анна инст\n"
+        "неважно 25.12\n"
+        "электронная\n"
+        "отправлено\n"
+        "1500"
+    )
+    await update.message.reply_text(template, parse_mode="Markdown", reply_markup=main_keyboard)
+
+# ---------- Список заказов ----------
+async def list_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🔍 Выберите фильтр для списка заказов:",
+        reply_markup=filter_keyboard
+    )
+    context.user_data['filter'] = None
+    context.user_data['page'] = 1
+
+# ---------- Статистика ----------
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        orders = sheet_orders.get_all_values()
+        expenses = sheet_expenses.get_all_values()
+        total_revenue = 0
+        paid_count = 0
+        for r in orders[1:]:
+            if len(r) > 8 and 'оплачено' in r[8].lower():
+                total_revenue += float(r[9]) if r[9] else 0
+                paid_count += 1
+        total_expenses = sum(float(r[2]) for r in expenses[1:] if len(r)>2 and r[2])
+        profit = total_revenue - total_expenses
+        status_counts = {}
+        for r in orders[1:]:
+            if len(r)>7:
+                status = r[7] or "Не указан"
+                status_counts[status] = status_counts.get(status, 0) + 1
+        status_lines = "\n".join(f"   • {s}: {c}" for s, c in status_counts.items())
+        msg = (
+            "📊 *СТАТИСТИКА*\n\n"
+            f"💰 Выручка: {total_revenue} руб.\n"
+            f"💸 Расходы: {total_expenses} руб.\n"
+            f"📈 Прибыль: {profit} руб.\n\n"
+            f"📦 Всего заказов: {len(orders)-1}\n"
+            f"✅ Оплачено: {paid_count}\n\n"
+            f"📌 Распределение по статусам:\n{status_lines}"
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=main_keyboard)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=main_keyboard)
+
+# ---------- Статистика за период ----------
+async def stats_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        args = context.args
+        if len(args) != 1:
+            await update.message.reply_text("❌ Используйте: /stats_date ДД.ММ.ГГГГ-ДД.ММ.ГГГГ", reply_markup=main_keyboard)
+            return
+        dates = args[0].split('-')
+        if len(dates) != 2:
+            raise ValueError("Неверный формат")
+        start = datetime.datetime.strptime(dates[0], '%d.%m.%Y')
+        end = datetime.datetime.strptime(dates[1], '%d.%m.%Y')
+        records = sheet_orders.get_all_values()
+        count = 0
+        paid = 0
+        revenue = 0
+        for r in records[1:]:
+            if len(r) < 10:
+                continue
+            try:
+                order_date = datetime.datetime.strptime(r[0].split()[0], '%Y-%m-%d')
+                if start <= order_date <= end:
+                    count += 1
+                    if 'оплачено' in r[8].lower():
+                        paid += 1
+                        revenue += float(r[9]) if r[9] else 0
+            except:
+                continue
+        msg = f"📊 *Статистика за {dates[0]} – {dates[1]}*\n\n📦 Заказов: {count}\n💰 Оплачено: {paid}\n💸 Выручка: {revenue} руб."
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=main_keyboard)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=main_keyboard)
+
+# ---------- Экспорт CSV ----------
+async def export_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        records = sheet_orders.get_all_values()
+        if len(records) <= 1:
+            await update.message.reply_text("📭 Нет данных.", reply_markup=main_keyboard)
+            return
+        output = io.StringIO()
+        csv.writer(output).writerows(records)
+        output.seek(0)
+        await update.message.reply_document(
+            document=output.getvalue().encode('utf-8'),
+            filename=f"заказы_{datetime.datetime.now().strftime('%Y%m%d')}.csv",
+            caption="📊 Экспорт всех заказов",
+            reply_markup=main_keyboard
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=main_keyboard)
+
+# ---------- Скриншот (выбор таблицы) ----------
+async def screenshot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📸 Выберите таблицу для скриншота:",
+        reply_markup=screenshot_choice_keyboard
+    )
+
+async def screenshot_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "cancel_screenshot":
+        await query.edit_message_text("❌ Скриншот отменён.", reply_markup=None)
+        await query.message.reply_text("Главное меню:", reply_markup=main_keyboard)
+        return
+
+    sheet_type = "orders" if data == "screenshot_orders" else "expenses"
+    await query.edit_message_text(f"⏳ Генерирую скриншот таблицы '{'Заказы' if sheet_type == 'orders' else 'Расходы'}'...")
+    img_path = generate_screenshot(sheet_type)
+    if img_path:
+        try:
+            with open(img_path, 'rb') as img_file:
+                caption = "📸 *Последние 10 записей в таблице Заказы*" if sheet_type == 'orders' else "📸 *Последние 10 записей в таблице Расходы*"
+                await query.message.reply_photo(
+                    photo=img_file,
+                    caption=caption,
+                    parse_mode="Markdown",
+                    reply_markup=main_keyboard
+                )
+            os.unlink(img_path)
+        except Exception as e:
+            await query.message.reply_text(f"❌ Ошибка при отправке скриншота: {e}", reply_markup=main_keyboard)
+    else:
+        await query.message.reply_text("📭 Нет данных для отображения.", reply_markup=main_keyboard)
+    await query.delete_message()
+
+# ---------- Ссылка на таблицу ----------
+async def table_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    link = "https://docs.google.com/spreadsheets/d/1biglRVO95f4sVINiL8j9-CRYKs_IQTOWiSHLblXR0_U/edit?usp=sharing"
+    await update.message.reply_text(
+        f"📋 *Ссылка на таблицу заказов:*\n{link}",
+        parse_mode="Markdown",
+        reply_markup=main_keyboard
+    )
+
+# ============================================
+#  ДИАЛОГ ДОБАВЛЕНИЯ РАСХОДА
+# ============================================
+
+EXPENSE_AMOUNT, EXPENSE_DESC = 2, 3
+
+async def expense_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("💰 Введите сумму расхода (число):", reply_markup=dialog_keyboard)
+    return EXPENSE_AMOUNT
+
+async def expense_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        amount = float(update.message.text.replace(',', '.'))
+        context.user_data['expense_amount'] = amount
+        await update.message.reply_text("📝 Введите описание расхода:", reply_markup=dialog_keyboard)
+        return EXPENSE_DESC
+    except:
+        await update.message.reply_text("❌ Введите число. Попробуйте снова:", reply_markup=dialog_keyboard)
+        return EXPENSE_AMOUNT
+
+async def expense_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    desc = update.message.text
+    amount = context.user_data.get('expense_amount')
+    if amount:
+        sheet_expenses.append_row([datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), desc, amount])
+        await update.message.reply_text(f"✅ Расход {amount} руб. добавлен.", reply_markup=main_keyboard)
+    else:
+        await update.message.reply_text("❌ Ошибка. Попробуйте заново.", reply_markup=main_keyboard)
+    context.user_data.pop('expense_amount', None)
+    return ConversationHandler.END
+
+async def cancel_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Добавление расхода отменено.", reply_markup=main_keyboard)
+    return ConversationHandler.END
+
+# ============================================
+#  ПОИСК (диалог)
 # ============================================
 
 SEARCH_NAME = 1
@@ -336,7 +607,7 @@ async def search_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "печать": "🔵",
                 "отправлено": "✅"
             }.get(row[7].lower() if len(row)>7 else "", "⚪")
-            paid_emoji = "💰" if len(row)>8 and row[8].lower() == "да" else "❌"
+            paid_emoji = "💰" if 'оплачено' in row[8].lower() else "❌"
             msg += f"{status_emoji} *{idx}.* {row[1]} ({row[2]})\n"
             msg += f"   Статус: {row[7]} | Оплата: {row[8]} | Сумма: {row[9]} руб.\n"
         if len(found) > 10:
@@ -350,221 +621,6 @@ async def search_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cancel_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Поиск отменён.", reply_markup=main_keyboard)
     return ConversationHandler.END
-
-# ============================================
-#  КОМАНДА /screenshot
-# ============================================
-
-async def screenshot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Генерирую скриншот таблицы...")
-    img_path = generate_screenshot()
-    if img_path:
-        try:
-            with open(img_path, 'rb') as img_file:
-                await update.message.reply_photo(
-                    photo=img_file,
-                    caption="📸 *Последние заказы в таблице*",
-                    parse_mode="Markdown",
-                    reply_markup=main_keyboard
-                )
-            os.unlink(img_path)
-        except Exception as e:
-            await update.message.reply_text(f"❌ Ошибка при отправке скриншота: {e}", reply_markup=main_keyboard)
-    else:
-        await update.message.reply_text("📭 Нет данных для отображения.", reply_markup=main_keyboard)
-
-# ============================================
-#  КОМАНДА /table (ссылка на таблицу)
-# ============================================
-
-async def table_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    link = "https://docs.google.com/spreadsheets/d/1biglRVO95f4sVINiL8j9-CRYKs_IQTOWiSHLblXR0_U/edit?usp=sharing"
-    await update.message.reply_text(
-        f"📊 *Ссылка на таблицу заказов:*\n{link}",
-        parse_mode="Markdown",
-        reply_markup=main_keyboard
-    )
-
-# ============================================
-#  ОСТАЛЬНЫЕ КОМАНДЫ (без изменений)
-# ============================================
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Привет! Я бот для учёта заказов.\n\n"
-        "Выберите действие из меню 👇",
-        reply_markup=main_keyboard
-    )
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = (
-        "📌 *Доступные действия:*\n\n"
-        "• /new_order – пошаговое создание заказа\n"
-        "• /quick – быстрый заказ одним сообщением (см. шаблон)\n"
-        "• /list_orders – список заказов (с фильтрами)\n"
-        "• /stats – общая статистика\n"
-        "• /stats_date ДД.ММ.ГГГГ-ДД.ММ.ГГГГ – статистика за период\n"
-        "• /add_expense сумма описание – добавить расход\n"
-        "• /export – экспорт всех заказов в CSV\n"
-        "• /search – поиск по имени (интерактивный)\n"
-        "• /screenshot – скриншот таблицы (изображение)\n"
-        "• /table – получить ссылку на таблицу\n"
-        "• /test – проверить работу бота\n"
-        "• /status – диагностика\n\n"
-        "Используйте кнопки меню для быстрого доступа."
-    )
-    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=main_keyboard)
-
-async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Бот работает!", reply_markup=main_keyboard)
-
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        orders_count = len(sheet_orders.get_all_values()) - 1
-        expenses_count = len(sheet_expenses.get_all_values()) - 1
-        webhook_info = await app.bot.get_webhook_info()
-        webhook_url = webhook_info.url if webhook_info else "не установлен"
-        pending = webhook_info.pending_update_count if webhook_info else 0
-        msg = (
-            "🔍 *Диагностика:*\n"
-            f"• Заказов: {orders_count}\n"
-            f"• Расходов: {expenses_count}\n"
-            f"• Вебхук: {webhook_url}\n"
-            f"• Ожидающих обновлений: {pending}"
-        )
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=main_keyboard)
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=main_keyboard)
-
-# ----- Пошаговый заказ (диалог) -----
-async def new_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user_data[chat_id] = {'step': 'client'}
-    await update.message.reply_text("📝 Введите имя клиента:", reply_markup=dialog_keyboard)
-
-# ----- Быстрый заказ (шаблон) -----
-async def quick_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    template = (
-        "📝 *Отправьте одним сообщением данные заказа в 5 строках:*\n\n"
-        "1) имя, ник (опционально), способ связи\n"
-        "2) город, дата (можно без запятой)\n"
-        "3) формат (печать / электронная)\n"
-        "4) статус (дизайн / печать / отправлено)\n"
-        "5) сумма (число)\n\n"
-        "*Примеры:*\n"
-        "Елена @cikovskay тг\n"
-        "Москва 21 августа\n"
-        "Печать\n"
-        "Дизайн\n"
-        "1800\n\n"
-        "Или без ника:\n"
-        "Анна инст\n"
-        "неважно 25.12\n"
-        "электронная\n"
-        "отправлено\n"
-        "1500"
-    )
-    await update.message.reply_text(template, parse_mode="Markdown", reply_markup=main_keyboard)
-
-# ----- Список заказов (вызов фильтров) -----
-async def list_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🔍 Выберите фильтр для списка заказов:",
-        reply_markup=filter_keyboard
-    )
-    context.user_data['filter'] = None
-    context.user_data['page'] = 1
-
-# ----- Остальные команды (статистика, расходы, экспорт) -----
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        orders = sheet_orders.get_all_values()
-        expenses = sheet_expenses.get_all_values()
-        total_revenue = sum(float(r[9]) for r in orders[1:] if len(r)>8 and r[8].lower()=='да' and r[9])
-        paid_count = sum(1 for r in orders[1:] if len(r)>8 and r[8].lower()=='да')
-        total_expenses = sum(float(r[2]) for r in expenses[1:] if len(r)>2 and r[2])
-        profit = total_revenue - total_expenses
-        status_counts = {}
-        for r in orders[1:]:
-            if len(r)>7:
-                status = r[7] or "Не указан"
-                status_counts[status] = status_counts.get(status, 0) + 1
-        status_lines = "\n".join(f"   • {s}: {c}" for s, c in status_counts.items())
-        msg = (
-            "📊 *СТАТИСТИКА*\n\n"
-            f"💰 Выручка: {total_revenue} руб.\n"
-            f"💸 Расходы: {total_expenses} руб.\n"
-            f"📈 Прибыль: {profit} руб.\n\n"
-            f"📦 Всего заказов: {len(orders)-1}\n"
-            f"✅ Оплачено: {paid_count}\n\n"
-            f"📌 Распределение по статусам:\n{status_lines}"
-        )
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=main_keyboard)
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=main_keyboard)
-
-async def stats_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        args = context.args
-        if len(args) != 1:
-            await update.message.reply_text("❌ Используйте: /stats_date ДД.ММ.ГГГГ-ДД.ММ.ГГГГ", reply_markup=main_keyboard)
-            return
-        dates = args[0].split('-')
-        if len(dates) != 2:
-            raise ValueError("Неверный формат")
-        start = datetime.datetime.strptime(dates[0], '%d.%m.%Y')
-        end = datetime.datetime.strptime(dates[1], '%d.%m.%Y')
-        records = sheet_orders.get_all_values()
-        count = 0
-        paid = 0
-        revenue = 0
-        for r in records[1:]:
-            if len(r) < 10:
-                continue
-            try:
-                order_date = datetime.datetime.strptime(r[0].split()[0], '%Y-%m-%d')
-                if start <= order_date <= end:
-                    count += 1
-                    if r[8].lower() == 'да':
-                        paid += 1
-                        revenue += float(r[9]) if r[9] else 0
-            except:
-                continue
-        msg = f"📊 *Статистика за {dates[0]} – {dates[1]}*\n\n📦 Заказов: {count}\n💰 Оплачено: {paid}\n💸 Выручка: {revenue} руб."
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=main_keyboard)
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=main_keyboard)
-
-async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        args = context.args
-        if len(args) < 2:
-            await update.message.reply_text("❌ /add_expense сумма описание", reply_markup=main_keyboard)
-            return
-        amount = float(args[0].replace(',', '.'))
-        desc = ' '.join(args[1:])
-        sheet_expenses.append_row([datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), desc, amount])
-        await update.message.reply_text(f"✅ Расход {amount} руб. добавлен.", reply_markup=main_keyboard)
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=main_keyboard)
-
-async def export_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        records = sheet_orders.get_all_values()
-        if len(records) <= 1:
-            await update.message.reply_text("📭 Нет данных.", reply_markup=main_keyboard)
-            return
-        output = io.StringIO()
-        csv.writer(output).writerows(records)
-        output.seek(0)
-        await update.message.reply_document(
-            document=output.getvalue().encode('utf-8'),
-            filename=f"заказы_{datetime.datetime.now().strftime('%Y%m%d')}.csv",
-            caption="📊 Экспорт всех заказов",
-            reply_markup=main_keyboard
-        )
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=main_keyboard)
 
 # ============================================
 #  ОТОБРАЖЕНИЕ СПИСКА ЗАКАЗОВ С КНОПКАМИ
@@ -591,8 +647,13 @@ async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if len(row) > 7 and row[7].lower() == value.lower():
                         filtered.append((idx, row))
                 elif key == 'paid':
-                    if len(row) > 8 and row[8].lower() == value.lower():
-                        filtered.append((idx, row))
+                    # Проверяем оплату: если value == "да" – ищем "оплачено", иначе "не оплачено"
+                    if value == "да":
+                        if len(row) > 8 and 'оплачено' in row[8].lower():
+                            filtered.append((idx, row))
+                    else:  # "нет"
+                        if len(row) > 8 and 'оплачено' not in row[8].lower():
+                            filtered.append((idx, row))
             else:
                 filtered.append((idx, row))
 
@@ -614,7 +675,7 @@ async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "печать": "🔵",
                 "отправлено": "✅"
             }.get(row[7].lower() if len(row)>7 else "", "⚪")
-            paid_emoji = "💰" if len(row)>8 and row[8].lower() == "да" else "❌"
+            paid_emoji = "💰" if 'оплачено' in row[8].lower() else "❌"
             msg += f"{status_emoji} *{idx}.* {row[1]} ({row[2]})\n"
             msg += f"   Статус: {row[7]} | Оплата: {row[8]} | Сумма: {row[9]} руб.\n\n"
 
@@ -645,7 +706,7 @@ async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"❌ Ошибка: {e}", reply_markup=None)
 
 # ============================================
-#  ОБРАБОТЧИКИ CALLBACK (без изменений)
+#  ОБРАБОТЧИКИ CALLBACK (фильтры, редактирование, удаление, скриншот)
 # ============================================
 
 async def filter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -728,7 +789,7 @@ async def edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("set_paid_"):
-        new_paid = data.split("_", 2)[2]
+        new_paid = data.split("_", 2)[2]  # "оплачено" или "не оплачено"
         order_id = context.user_data.get('editing_id')
         if order_id:
             try:
@@ -840,12 +901,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     text = update.message.text
 
-    # Редактирование — ожидание ввода
     if context.user_data.get('waiting_for_edit_input'):
         await handle_edit_input(update, context)
         return
 
-    # Отмена
     if text == "🔙 Отмена":
         if chat_id in user_data:
             del user_data[chat_id]
@@ -892,7 +951,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     state['client'], state.get('nick', ''), state['contact'],
                     state['holiday'], state['city'], state['format'],
-                    state['status'], 'Да', amount_value
+                    state['status'], 'Оплачено', amount_value
                 ]
                 sheet_orders.append_row(row)
                 await update.message.reply_text("✅ Заказ добавлен!", reply_markup=main_keyboard)
@@ -948,13 +1007,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "📊 Статистика":
         await stats(update, context)
     elif text == "💰 Добавить расход":
-        await update.message.reply_text("Используйте: /add_expense сумма описание", reply_markup=main_keyboard)
+        await expense_start(update, context)
     elif text == "🔍 Поиск":
-        await update.message.reply_text("Введите имя для поиска:", reply_markup=dialog_keyboard)
-        return ConversationHandler(entry_points=[], states={SEARCH_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_name)]}, fallbacks=[CommandHandler('cancel', cancel_search)])
+        await search_start(update, context)
     elif text == "📸 Скриншот":
         await screenshot_command(update, context)
-    elif text == "📊 Таблица":
+    elif text == "📋 Таблица":
         await table_command(update, context)
     elif text == "❓ Помощь":
         await help_command(update, context)
@@ -975,6 +1033,15 @@ conv_search = ConversationHandler(
     fallbacks=[CommandHandler('cancel', cancel_search)]
 )
 
+conv_expense = ConversationHandler(
+    entry_points=[CommandHandler('add_expense', expense_start)],
+    states={
+        EXPENSE_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, expense_amount)],
+        EXPENSE_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, expense_desc)]
+    },
+    fallbacks=[CommandHandler('cancel', cancel_expense)]
+)
+
 app.add_handler(CommandHandler('start', start))
 app.add_handler(CommandHandler('help', help_command))
 app.add_handler(CommandHandler('test', test_command))
@@ -984,15 +1051,16 @@ app.add_handler(CommandHandler('quick', quick_order))
 app.add_handler(CommandHandler('list_orders', list_orders))
 app.add_handler(CommandHandler('stats', stats))
 app.add_handler(CommandHandler('stats_date', stats_date))
-app.add_handler(CommandHandler('add_expense', add_expense))
 app.add_handler(CommandHandler('export', export_csv))
 app.add_handler(CommandHandler('screenshot', screenshot_command))
 app.add_handler(CommandHandler('table', table_command))
 app.add_handler(conv_search)
+app.add_handler(conv_expense)
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 app.add_handler(CallbackQueryHandler(filter_callback, pattern='^(filter_|page_|status_|paid_|cancel_filter)'))
 app.add_handler(CallbackQueryHandler(edit_callback, pattern='^(edit_|set_|delete_order_|cancel_edit)'))
 app.add_handler(CallbackQueryHandler(delete_callback, pattern='^(confirm_delete|cancel_delete)'))
+app.add_handler(CallbackQueryHandler(screenshot_choice_callback, pattern='^screenshot_'))
 app.add_error_handler(error_handler)
 
 # ============================================
