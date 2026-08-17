@@ -150,8 +150,8 @@ paid_keyboard = InlineKeyboardMarkup([
 ])
 
 screenshot_choice_keyboard = InlineKeyboardMarkup([
-    [InlineKeyboardButton("📋 Заказы", callback_data="screenshot_orders"),
-     [InlineKeyboardButton("💰 Расходы", callback_data="screenshot_expenses")],
+    [InlineKeyboardButton("📋 Заказы", callback_data="screenshot_orders")],
+    [InlineKeyboardButton("💰 Расходы", callback_data="screenshot_expenses")],
     [InlineKeyboardButton("🔙 Отмена", callback_data="cancel_screenshot")]
 ])
 
