@@ -36,32 +36,38 @@ app = ApplicationBuilder().token(BOT_TOKEN).build()
 user_data = {}
 
 # ============================================
-#  АВТОУДАЛЕНИЕ СООБЩЕНИЙ
+#  УПРАВЛЕНИЕ УДАЛЕНИЕМ СООБЩЕНИЙ
 # ============================================
 
-async def delete_later(context, chat_id, message_id, delay=5):
-    """Удаляет сообщение через заданное количество секунд."""
-    await asyncio.sleep(delay)
-    try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception as e:
-        print(f"[LOG] Не удалось удалить сообщение {message_id}: {e}")
+async def clear_previous_messages(update, context):
+    """Удаляет все сообщения, сохранённые для удаления, и очищает список."""
+    msgs = context.user_data.get('msgs_to_delete', [])
+    if msgs:
+        for chat_id, msg_id in msgs:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            except Exception as e:
+                pass  # игнорируем ошибки (сообщение уже могло быть удалено)
+        context.user_data['msgs_to_delete'] = []
 
-async def safe_delete(update, context, message, delay=5, keep=False):
-    """Удаляет сообщение пользователя и ответное сообщение бота (если keep=False, то удаляет всё)."""
-    if not keep:
-        # Удаляем сообщение пользователя
+async def add_message_to_delete(update, context, message):
+    """Добавляет сообщение (бот или пользователя) в список для удаления."""
+    if not message:
+        return
+    chat_id = update.effective_chat.id
+    msg_id = message.message_id
+    if 'msgs_to_delete' not in context.user_data:
+        context.user_data['msgs_to_delete'] = []
+    context.user_data['msgs_to_delete'].append((chat_id, msg_id))
+
+async def delete_user_message(update, context):
+    """Удаляет сообщение пользователя (если оно есть)."""
+    if update.message:
         try:
-            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=update.message.message_id)
-        except:
-            pass
-        # Удаляем сообщение бота (если оно есть)
-        if message:
-            asyncio.create_task(delete_later(context, update.effective_chat.id, message.message_id, delay))
-    else:
-        # Если keep=True, то сообщение бота не удаляем, но пользовательское удаляем
-        try:
-            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=update.message.message_id)
+            await context.bot.delete_message(
+                chat_id=update.effective_chat.id,
+                message_id=update.message.message_id
+            )
         except:
             pass
 
@@ -74,11 +80,12 @@ async def error_handler(update, context):
     traceback.print_exception(type(context.error), context.error, context.error.__traceback__)
     try:
         if update and update.effective_message:
+            await clear_previous_messages(update, context)
             msg = await update.effective_message.reply_text(
                 "❌ Произошла ошибка. Администратор уведомлён.",
                 reply_markup=main_keyboard
             )
-            await safe_delete(update, context, msg, delay=3, keep=False)
+            # важное сообщение не удаляем
     except:
         pass
 
@@ -90,7 +97,7 @@ main_keyboard = ReplyKeyboardMarkup(
     [
         ["📦 Пошаговый заказ", "⚡ Быстрый заказ"],
         ["📋 Список заказов", "📊 Статистика"],
-        ["💰 Добавить расход", "📋 Расходы"],   # новая кнопка для управления расходами
+        ["💰 Добавить расход", "📋 Расходы"],
         ["🔍 Поиск", "📸 Скриншот"],
         ["📋 Таблица", "❓ Помощь"]
     ],
@@ -147,7 +154,6 @@ screenshot_choice_keyboard = InlineKeyboardMarkup([
     [InlineKeyboardButton("🔙 Отмена", callback_data="cancel_screenshot")]
 ])
 
-# Клавиатура для управления расходами (список)
 expense_pagination_keyboard = InlineKeyboardMarkup([
     [InlineKeyboardButton("◀️", callback_data="exp_page_prev"),
      InlineKeyboardButton("▶️", callback_data="exp_page_next")],
@@ -155,7 +161,7 @@ expense_pagination_keyboard = InlineKeyboardMarkup([
 ])
 
 # ============================================
-#  ФУНКЦИЯ НОРМАЛИЗАЦИИ ДАТЫ
+#  ФУНКЦИИ НОРМАЛИЗАЦИИ, ПАРСИНГА, ГЕНЕРАЦИИ
 # ============================================
 
 def normalize_date(date_str):
@@ -234,10 +240,6 @@ def normalize_date(date_str):
                     pass
     return date_str
 
-# ============================================
-#  ПАРСИНГ БЫСТРОГО ЗАКАЗА
-# ============================================
-
 def parse_quick_order(text):
     lines = [line.strip() for line in text.split('\n') if line.strip()]
     if len(lines) < 5:
@@ -291,10 +293,6 @@ def parse_quick_order(text):
     except Exception as e:
         raise ValueError(f"Ошибка парсинга: {e}")
 
-# ============================================
-#  ГЕНЕРАЦИЯ СКРИНШОТА (ФИКС)
-# ============================================
-
 def generate_screenshot(sheet_type='orders'):
     try:
         if sheet_type == 'orders':
@@ -310,12 +308,10 @@ def generate_screenshot(sheet_type='orders'):
 
         records = sheet.get_all_values()
         if len(records) <= 1:
-            print("[LOG] Нет данных для скриншота")
             return None
 
         headers = records[0]
-        data = records[1:11]  # последние 10 записей
-
+        data = records[1:11]
         if not data:
             return None
 
@@ -328,7 +324,6 @@ def generate_screenshot(sheet_type='orders'):
         table_data = []
         table_data.append(headers[:col_count])
         for row in data:
-            # если в строке меньше колонок, дополняем пустыми
             row_filled = row + [''] * (col_count - len(row))
             table_data.append(row_filled[:col_count])
 
@@ -356,18 +351,22 @@ def generate_screenshot(sheet_type='orders'):
         return None
 
 # ============================================
-#  ОБРАБОТЧИКИ КОМАНД
+#  ОБРАБОТЧИКИ КОМАНД (с управлением удалением)
 # ============================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await clear_previous_messages(update, context)
+    await delete_user_message(update, context)
     msg = await update.message.reply_text(
         "👋 Привет! Я бот для учёта заказов.\n\n"
         "Выберите действие из меню 👇",
         reply_markup=main_keyboard
     )
-    await safe_delete(update, context, msg, delay=3, keep=False)
+    await add_message_to_delete(update, context, msg)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await clear_previous_messages(update, context)
+    await delete_user_message(update, context)
     msg = await update.message.reply_text(
         "📌 *Доступные действия:*\n\n"
         "• /new_order – пошаговое создание заказа\n"
@@ -387,13 +386,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
         reply_markup=main_keyboard
     )
-    await safe_delete(update, context, msg, delay=5, keep=False)
+    await add_message_to_delete(update, context, msg)
 
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await clear_previous_messages(update, context)
+    await delete_user_message(update, context)
     msg = await update.message.reply_text("✅ Бот работает!", reply_markup=main_keyboard)
-    await safe_delete(update, context, msg, delay=3, keep=False)
+    await add_message_to_delete(update, context, msg)
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await clear_previous_messages(update, context)
+    await delete_user_message(update, context)
     try:
         orders_count = len(sheet_orders.get_all_values()) - 1
         expenses_count = len(sheet_expenses.get_all_values()) - 1
@@ -409,20 +412,24 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
             reply_markup=main_keyboard
         )
-        await safe_delete(update, context, msg, delay=5, keep=False)
+        await add_message_to_delete(update, context, msg)
     except Exception as e:
         msg = await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=main_keyboard)
-        await safe_delete(update, context, msg, delay=3, keep=False)
+        await add_message_to_delete(update, context, msg)
 
 # ---------- Пошаговый заказ ----------
 async def new_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await clear_previous_messages(update, context)
+    await delete_user_message(update, context)
     chat_id = update.effective_chat.id
     user_data[chat_id] = {'step': 'client'}
     msg = await update.message.reply_text("📝 Введите имя клиента:", reply_markup=dialog_keyboard)
-    await safe_delete(update, context, msg, delay=3, keep=False)
+    await add_message_to_delete(update, context, msg)
 
 # ---------- Быстрый заказ ----------
 async def quick_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await clear_previous_messages(update, context)
+    await delete_user_message(update, context)
     template = (
         "📝 *Отправьте одним сообщением данные заказа в 5 строках:*\n\n"
         "1) имя, ник (опционально), способ связи\n"
@@ -444,20 +451,24 @@ async def quick_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1500"
     )
     msg = await update.message.reply_text(template, parse_mode="Markdown", reply_markup=main_keyboard)
-    await safe_delete(update, context, msg, delay=5, keep=False)
+    await add_message_to_delete(update, context, msg)
 
 # ---------- Список заказов ----------
 async def list_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await clear_previous_messages(update, context)
+    await delete_user_message(update, context)
     msg = await update.message.reply_text(
         "🔍 Выберите фильтр для списка заказов:",
         reply_markup=filter_keyboard
     )
-    await safe_delete(update, context, msg, delay=3, keep=False)
+    await add_message_to_delete(update, context, msg)
     context.user_data['filter'] = None
     context.user_data['page'] = 1
 
 # ---------- Статистика ----------
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await clear_previous_messages(update, context)
+    await delete_user_message(update, context)
     try:
         orders = sheet_orders.get_all_values()
         expenses = sheet_expenses.get_all_values()
@@ -485,18 +496,20 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📌 Распределение по статусам:\n{status_lines}"
         )
         msg = await update.message.reply_text(msg_text, parse_mode="Markdown", reply_markup=main_keyboard)
-        await safe_delete(update, context, msg, delay=5, keep=False)
+        await add_message_to_delete(update, context, msg)
     except Exception as e:
         msg = await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=main_keyboard)
-        await safe_delete(update, context, msg, delay=3, keep=False)
+        await add_message_to_delete(update, context, msg)
 
 # ---------- Статистика за период ----------
 async def stats_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await clear_previous_messages(update, context)
+    await delete_user_message(update, context)
     try:
         args = context.args
         if len(args) != 1:
             msg = await update.message.reply_text("❌ Используйте: /stats_date ДД.ММ.ГГГГ-ДД.ММ.ГГГГ", reply_markup=main_keyboard)
-            await safe_delete(update, context, msg, delay=3, keep=False)
+            await add_message_to_delete(update, context, msg)
             return
         dates = args[0].split('-')
         if len(dates) != 2:
@@ -521,18 +534,20 @@ async def stats_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
         msg_text = f"📊 *Статистика за {dates[0]} – {dates[1]}*\n\n📦 Заказов: {count}\n💰 Оплачено: {paid}\n💸 Выручка: {revenue} руб."
         msg = await update.message.reply_text(msg_text, parse_mode="Markdown", reply_markup=main_keyboard)
-        await safe_delete(update, context, msg, delay=5, keep=False)
+        await add_message_to_delete(update, context, msg)
     except Exception as e:
         msg = await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=main_keyboard)
-        await safe_delete(update, context, msg, delay=3, keep=False)
+        await add_message_to_delete(update, context, msg)
 
 # ---------- Экспорт CSV ----------
 async def export_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await clear_previous_messages(update, context)
+    await delete_user_message(update, context)
     try:
         records = sheet_orders.get_all_values()
         if len(records) <= 1:
             msg = await update.message.reply_text("📭 Нет данных.", reply_markup=main_keyboard)
-            await safe_delete(update, context, msg, delay=3, keep=False)
+            await add_message_to_delete(update, context, msg)
             return
         output = io.StringIO()
         csv.writer(output).writerows(records)
@@ -543,28 +558,34 @@ async def export_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption="📊 Экспорт всех заказов",
             reply_markup=main_keyboard
         )
-        await safe_delete(update, context, msg, delay=5, keep=False)
+        await add_message_to_delete(update, context, msg)
     except Exception as e:
         msg = await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=main_keyboard)
-        await safe_delete(update, context, msg, delay=3, keep=False)
+        await add_message_to_delete(update, context, msg)
 
 # ---------- Скриншот ----------
 async def screenshot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await clear_previous_messages(update, context)
+    await delete_user_message(update, context)
     msg = await update.message.reply_text(
         "📸 Выберите таблицу для скриншота:",
         reply_markup=screenshot_choice_keyboard
     )
-    await safe_delete(update, context, msg, delay=3, keep=False)
+    await add_message_to_delete(update, context, msg)
 
 async def screenshot_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
 
+    # Удаляем предыдущие сообщения (включая сообщение с выбором)
+    await clear_previous_messages(update, context)
+    # Сообщение пользователя (колбэк) удалить нельзя, но мы удалим его в конце
+
     if data == "cancel_screenshot":
         await query.edit_message_text("❌ Скриншот отменён.", reply_markup=None)
         msg = await query.message.reply_text("Главное меню:", reply_markup=main_keyboard)
-        await safe_delete(update, context, msg, delay=3, keep=False)
+        await add_message_to_delete(update, context, msg)
         return
 
     sheet_type = "orders" if data == "screenshot_orders" else "expenses"
@@ -580,36 +601,43 @@ async def screenshot_choice_callback(update: Update, context: ContextTypes.DEFAU
                     parse_mode="Markdown",
                     reply_markup=main_keyboard
                 )
-                await safe_delete(update, context, msg, delay=5, keep=False)
+                await add_message_to_delete(update, context, msg)
             os.unlink(img_path)
         except Exception as e:
             msg = await query.message.reply_text(f"❌ Ошибка при отправке скриншота: {e}", reply_markup=main_keyboard)
-            await safe_delete(update, context, msg, delay=3, keep=False)
+            await add_message_to_delete(update, context, msg)
     else:
         msg = await query.message.reply_text("📭 Нет данных для отображения.", reply_markup=main_keyboard)
-        await safe_delete(update, context, msg, delay=3, keep=False)
-    await query.delete_message()
+        await add_message_to_delete(update, context, msg)
+    # Удаляем сообщение с колбэком (сам запрос)
+    try:
+        await query.delete_message()
+    except:
+        pass
 
 # ---------- Ссылка на таблицу ----------
 async def table_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await clear_previous_messages(update, context)
+    await delete_user_message(update, context)
     link = "https://docs.google.com/spreadsheets/d/1biglRVO95f4sVINiL8j9-CRYKs_IQTOWiSHLblXR0_U/edit?usp=sharing"
     msg = await update.message.reply_text(
         f"📋 *Ссылка на таблицу заказов:*\n{link}",
         parse_mode="Markdown",
         reply_markup=main_keyboard
     )
-    await safe_delete(update, context, msg, delay=5, keep=False)
+    await add_message_to_delete(update, context, msg)
 
 # ============================================
-#  УПРАВЛЕНИЕ РАСХОДАМИ (список, редактирование, удаление)
+#  УПРАВЛЕНИЕ РАСХОДАМИ
 # ============================================
 
-# ---------- Список расходов с пагинацией ----------
 async def expenses_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await clear_previous_messages(update, context)
+    await delete_user_message(update, context)
     context.user_data['exp_page'] = 1
-    await show_expenses_page(update, context)
+    await show_expenses_page(update, context, callback=False)
 
-async def show_expenses_page(update: Update, context: ContextTypes.DEFAULT_TYPE, callback=False):
+async def show_expenses_page(update, context, callback=False):
     page = context.user_data.get('exp_page', 1)
     try:
         records = sheet_expenses.get_all_values()
@@ -618,11 +646,11 @@ async def show_expenses_page(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 query = update.callback_query
                 await query.edit_message_text("📭 Расходов пока нет.", reply_markup=None)
                 msg = await query.message.reply_text("Главное меню:", reply_markup=main_keyboard)
-                await safe_delete(update, context, msg, delay=3, keep=False)
+                await add_message_to_delete(update, context, msg)
                 return
             else:
                 msg = await update.message.reply_text("📭 Расходов пока нет.", reply_markup=main_keyboard)
-                await safe_delete(update, context, msg, delay=3, keep=False)
+                await add_message_to_delete(update, context, msg)
                 return
 
         data_rows = records[1:]
@@ -661,7 +689,7 @@ async def show_expenses_page(update: Update, context: ContextTypes.DEFAULT_TYPE,
             await query.edit_message_text(msg_text, parse_mode="Markdown", reply_markup=keyboard)
         else:
             msg = await update.message.reply_text(msg_text, parse_mode="Markdown", reply_markup=keyboard)
-            await safe_delete(update, context, msg, delay=5, keep=False)
+            await add_message_to_delete(update, context, msg)
 
     except Exception as e:
         if callback:
@@ -669,16 +697,17 @@ async def show_expenses_page(update: Update, context: ContextTypes.DEFAULT_TYPE,
             await query.edit_message_text(f"❌ Ошибка: {e}", reply_markup=None)
         else:
             msg = await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=main_keyboard)
-            await safe_delete(update, context, msg, delay=3, keep=False)
+            await add_message_to_delete(update, context, msg)
 
 async def exp_pagination_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
     if data == "exp_cancel":
+        await clear_previous_messages(update, context)
         await query.edit_message_text("❌ Список расходов закрыт.", reply_markup=None)
         msg = await query.message.reply_text("Главное меню:", reply_markup=main_keyboard)
-        await safe_delete(update, context, msg, delay=3, keep=False)
+        await add_message_to_delete(update, context, msg)
         return
     elif data == "exp_page_prev":
         context.user_data['exp_page'] = max(1, context.user_data.get('exp_page', 1) - 1)
@@ -686,7 +715,7 @@ async def exp_pagination_callback(update: Update, context: ContextTypes.DEFAULT_
         context.user_data['exp_page'] = context.user_data.get('exp_page', 1) + 1
     await show_expenses_page(update, context, callback=True)
 
-# ---------- Редактирование расхода ----------
+# ---------- Редактирование расхода (диалог) ----------
 EXP_EDIT_FIELD, EXP_EDIT_VALUE = 4, 5
 
 async def exp_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -711,6 +740,7 @@ async def exp_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
     if data == "exp_edit_cancel":
+        await clear_previous_messages(update, context)
         await query.edit_message_text("❌ Редактирование отменено.", reply_markup=None)
         await show_expenses_page(update, context, callback=True)
         return
@@ -721,7 +751,8 @@ async def exp_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📝 Введите новое значение для поля '{'Описание' if field == 'desc' else 'Сумма'}':",
             reply_markup=None
         )
-        return
+        # переходим в состояние ожидания ввода
+        return EXP_EDIT_VALUE
 
 async def exp_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -729,7 +760,7 @@ async def exp_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     exp_id = context.user_data.get('editing_exp_id')
     if not field or not exp_id:
         msg = await update.message.reply_text("❌ Ошибка.", reply_markup=main_keyboard)
-        await safe_delete(update, context, msg, delay=3, keep=False)
+        await add_message_to_delete(update, context, msg)
         return ConversationHandler.END
 
     try:
@@ -737,25 +768,30 @@ async def exp_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if field == "amount":
             try:
                 new_value = float(text.replace(',', '.'))
-                sheet_expenses.update_cell(row_num, 3, new_value)  # колонка C (индекс 3)
+                sheet_expenses.update_cell(row_num, 3, new_value)
             except:
                 msg = await update.message.reply_text("❌ Сумма должна быть числом.", reply_markup=main_keyboard)
-                await safe_delete(update, context, msg, delay=3, keep=False)
+                await add_message_to_delete(update, context, msg)
                 return
         else:
-            sheet_expenses.update_cell(row_num, 2, text)  # колонка B (индекс 2)
+            sheet_expenses.update_cell(row_num, 2, text)
+        # Важное сообщение (не удаляем)
+        await clear_previous_messages(update, context)
+        await delete_user_message(update, context)
         msg = await update.message.reply_text(f"✅ Расход #{exp_id} обновлён.", reply_markup=main_keyboard)
-        await safe_delete(update, context, msg, delay=5, keep=True)  # важное сообщение
+        # не добавляем в список для удаления (оставляем)
     except Exception as e:
         msg = await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=main_keyboard)
-        await safe_delete(update, context, msg, delay=3, keep=False)
+        await add_message_to_delete(update, context, msg)
     context.user_data.pop('exp_edit_field', None)
     context.user_data.pop('editing_exp_id', None)
     return ConversationHandler.END
 
 async def exp_edit_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await clear_previous_messages(update, context)
+    await delete_user_message(update, context)
     msg = await update.message.reply_text("❌ Редактирование отменено.", reply_markup=main_keyboard)
-    await safe_delete(update, context, msg, delay=3, keep=False)
+    await add_message_to_delete(update, context, msg)
     context.user_data.pop('exp_edit_field', None)
     context.user_data.pop('editing_exp_id', None)
     return ConversationHandler.END
@@ -786,16 +822,18 @@ async def exp_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if exp_id:
             try:
                 sheet_expenses.delete_rows(exp_id + 1, exp_id + 1)
+                await clear_previous_messages(update, context)
                 await query.edit_message_text(f"✅ Расход #{exp_id} удалён.")
-                # Важное сообщение
+                # Важное сообщение, не удаляем
                 msg = await query.message.reply_text("Главное меню:", reply_markup=main_keyboard)
-                await safe_delete(update, context, msg, delay=3, keep=False)
+                # не добавляем в список удаления
             except Exception as e:
                 await query.edit_message_text(f"❌ Ошибка: {e}")
         else:
             await query.edit_message_text("❌ Нет данных.")
         context.user_data.pop('delete_exp_id', None)
     elif data == "exp_cancel_delete":
+        await clear_previous_messages(update, context)
         await query.edit_message_text("❌ Удаление отменено.")
         await show_expenses_page(update, context, callback=True)
 
@@ -806,20 +844,25 @@ async def exp_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
 EXPENSE_AMOUNT, EXPENSE_DESC = 2, 3
 
 async def expense_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await clear_previous_messages(update, context)
+    await delete_user_message(update, context)
     msg = await update.message.reply_text("💰 Введите сумму расхода (число):", reply_markup=dialog_keyboard)
-    await safe_delete(update, context, msg, delay=3, keep=False)
+    await add_message_to_delete(update, context, msg)
     return EXPENSE_AMOUNT
 
 async def expense_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         amount = float(update.message.text.replace(',', '.'))
         context.user_data['expense_amount'] = amount
+        # Удаляем предыдущие сообщения и сообщение пользователя
+        await clear_previous_messages(update, context)
+        await delete_user_message(update, context)
         msg = await update.message.reply_text("📝 Введите описание расхода:", reply_markup=dialog_keyboard)
-        await safe_delete(update, context, msg, delay=3, keep=False)
+        await add_message_to_delete(update, context, msg)
         return EXPENSE_DESC
     except:
         msg = await update.message.reply_text("❌ Введите число. Попробуйте снова:", reply_markup=dialog_keyboard)
-        await safe_delete(update, context, msg, delay=3, keep=False)
+        await add_message_to_delete(update, context, msg)
         return EXPENSE_AMOUNT
 
 async def expense_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -827,42 +870,48 @@ async def expense_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     amount = context.user_data.get('expense_amount')
     if amount:
         sheet_expenses.append_row([datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), desc, amount])
+        # Важное сообщение, не удаляем
+        await clear_previous_messages(update, context)
+        await delete_user_message(update, context)
         msg = await update.message.reply_text(f"✅ Расход {amount} руб. добавлен.", reply_markup=main_keyboard)
-        await safe_delete(update, context, msg, delay=5, keep=True)  # важное сообщение
     else:
         msg = await update.message.reply_text("❌ Ошибка. Попробуйте заново.", reply_markup=main_keyboard)
-        await safe_delete(update, context, msg, delay=3, keep=False)
+        await add_message_to_delete(update, context, msg)
     context.user_data.pop('expense_amount', None)
     return ConversationHandler.END
 
 async def cancel_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await clear_previous_messages(update, context)
+    await delete_user_message(update, context)
     msg = await update.message.reply_text("❌ Добавление расхода отменено.", reply_markup=main_keyboard)
-    await safe_delete(update, context, msg, delay=3, keep=False)
+    await add_message_to_delete(update, context, msg)
     return ConversationHandler.END
 
 # ============================================
-#  ПОИСК (диалог)
+#  ПОИСК
 # ============================================
 
 SEARCH_NAME = 1
 
 async def search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await clear_previous_messages(update, context)
+    await delete_user_message(update, context)
     msg = await update.message.reply_text("🔍 Введите имя клиента для поиска:", reply_markup=dialog_keyboard)
-    await safe_delete(update, context, msg, delay=3, keep=False)
+    await add_message_to_delete(update, context, msg)
     return SEARCH_NAME
 
 async def search_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text.strip()
     if not query:
         msg = await update.message.reply_text("❌ Имя не может быть пустым.", reply_markup=main_keyboard)
-        await safe_delete(update, context, msg, delay=3, keep=False)
+        await add_message_to_delete(update, context, msg)
         return ConversationHandler.END
 
     try:
         records = sheet_orders.get_all_values()
         if len(records) <= 1:
             msg = await update.message.reply_text("📭 Заказов пока нет.", reply_markup=main_keyboard)
-            await safe_delete(update, context, msg, delay=3, keep=False)
+            await add_message_to_delete(update, context, msg)
             return ConversationHandler.END
 
         found = []
@@ -872,7 +921,7 @@ async def search_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not found:
             msg = await update.message.reply_text(f"🔍 Ничего не найдено по запросу '{query}'.", reply_markup=main_keyboard)
-            await safe_delete(update, context, msg, delay=3, keep=False)
+            await add_message_to_delete(update, context, msg)
             return ConversationHandler.END
 
         msg_text = f"🔍 Найдено {len(found)} заказов:\n\n"
@@ -889,20 +938,24 @@ async def search_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(found) > 10:
             msg_text += f"\n... и ещё {len(found)-10} заказов. Используйте список для просмотра."
 
+        await clear_previous_messages(update, context)
+        await delete_user_message(update, context)
         msg = await update.message.reply_text(msg_text, parse_mode="Markdown", reply_markup=main_keyboard)
-        await safe_delete(update, context, msg, delay=5, keep=False)
+        await add_message_to_delete(update, context, msg)
     except Exception as e:
         msg = await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=main_keyboard)
-        await safe_delete(update, context, msg, delay=3, keep=False)
+        await add_message_to_delete(update, context, msg)
     return ConversationHandler.END
 
 async def cancel_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await clear_previous_messages(update, context)
+    await delete_user_message(update, context)
     msg = await update.message.reply_text("❌ Поиск отменён.", reply_markup=main_keyboard)
-    await safe_delete(update, context, msg, delay=3, keep=False)
+    await add_message_to_delete(update, context, msg)
     return ConversationHandler.END
 
 # ============================================
-#  ОТОБРАЖЕНИЕ СПИСКА ЗАКАЗОВ С КНОПКАМИ
+#  ОТОБРАЖЕНИЕ СПИСКА ЗАКАЗОВ (callback)
 # ============================================
 
 async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -991,10 +1044,12 @@ async def filter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
+    await clear_previous_messages(update, context)
+
     if data == "cancel_filter":
         await query.edit_message_text("❌ Фильтр отменён.", reply_markup=None)
         msg = await query.message.reply_text("Главное меню:", reply_markup=main_keyboard)
-        await safe_delete(update, context, msg, delay=3, keep=False)
+        await add_message_to_delete(update, context, msg)
         return
 
     if data.startswith("status_"):
@@ -1020,6 +1075,8 @@ async def edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
+
+    await clear_previous_messages(update, context)
 
     if data == "cancel_edit":
         await query.edit_message_text("❌ Редактирование отменено.", reply_markup=None)
@@ -1057,6 +1114,7 @@ async def edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 sheet_orders.update_cell(order_id + 1, 8, new_status)
                 await query.edit_message_text(f"✅ Статус заказа #{order_id} обновлён.")
+                # важное сообщение, не удаляем
             except Exception as e:
                 await query.edit_message_text(f"❌ Ошибка: {e}")
         else:
@@ -1101,6 +1159,8 @@ async def delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
+    await clear_previous_messages(update, context)
+
     if data == "confirm_delete":
         order_id = context.user_data.get('delete_id')
         row_num = context.user_data.get('delete_row')
@@ -1108,8 +1168,9 @@ async def delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 sheet_orders.delete_rows(row_num, row_num)
                 await query.edit_message_text(f"✅ Заказ #{order_id} удалён.")
+                # важное сообщение, не удаляем
                 msg = await query.message.reply_text("Главное меню:", reply_markup=main_keyboard)
-                await safe_delete(update, context, msg, delay=3, keep=False)
+                # не добавляем в список
             except Exception as e:
                 await query.edit_message_text(f"❌ Ошибка: {e}")
         else:
@@ -1135,7 +1196,7 @@ async def handle_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order_id = context.user_data.get('editing_id')
     if not field or not order_id:
         msg = await update.message.reply_text("❌ Ошибка.", reply_markup=main_keyboard)
-        await safe_delete(update, context, msg, delay=3, keep=False)
+        await add_message_to_delete(update, context, msg)
         context.user_data.pop('waiting_for_edit_input', None)
         return
     try:
@@ -1150,7 +1211,7 @@ async def handle_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         col = col_map.get(field)
         if not col:
             msg = await update.message.reply_text("❌ Неизвестное поле.", reply_markup=main_keyboard)
-            await safe_delete(update, context, msg, delay=3, keep=False)
+            await add_message_to_delete(update, context, msg)
             context.user_data.pop('waiting_for_edit_input', None)
             return
         row_num = order_id + 1
@@ -1160,16 +1221,18 @@ async def handle_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 sheet_orders.update_cell(row_num, col, new_value)
             except:
                 msg = await update.message.reply_text("❌ Сумма должна быть числом.", reply_markup=main_keyboard)
-                await safe_delete(update, context, msg, delay=3, keep=False)
+                await add_message_to_delete(update, context, msg)
                 context.user_data.pop('waiting_for_edit_input', None)
                 return
         else:
             sheet_orders.update_cell(row_num, col, text)
+        # Важное сообщение, не удаляем
+        await clear_previous_messages(update, context)
+        await delete_user_message(update, context)
         msg = await update.message.reply_text(f"✅ Поле '{field}' обновлено.", reply_markup=main_keyboard)
-        await safe_delete(update, context, msg, delay=5, keep=True)  # важное сообщение
     except Exception as e:
         msg = await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=main_keyboard)
-        await safe_delete(update, context, msg, delay=3, keep=False)
+        await add_message_to_delete(update, context, msg)
     context.user_data.pop('waiting_for_edit_input', None)
     context.user_data.pop('edit_field', None)
     context.user_data.pop('editing_id', None)
@@ -1193,8 +1256,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "🔙 Отмена":
         if chat_id in user_data:
             del user_data[chat_id]
+        await clear_previous_messages(update, context)
+        await delete_user_message(update, context)
         msg = await update.message.reply_text("❌ Отменено.", reply_markup=main_keyboard)
-        await safe_delete(update, context, msg, delay=3, keep=False)
+        await add_message_to_delete(update, context, msg)
         return
 
     # Диалог пошагового заказа
@@ -1204,38 +1269,52 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if step == 'client':
             state['client'] = text
             state['step'] = 'nick'
+            await clear_previous_messages(update, context)
+            await delete_user_message(update, context)
             msg = await update.message.reply_text("📝 Введите ник (можно пропустить):", reply_markup=dialog_keyboard)
-            await safe_delete(update, context, msg, delay=3, keep=False)
+            await add_message_to_delete(update, context, msg)
         elif step == 'nick':
             state['nick'] = text if text != '-' else ''
             state['step'] = 'contact'
+            await clear_previous_messages(update, context)
+            await delete_user_message(update, context)
             msg = await update.message.reply_text("📝 Способ связи (Инст, ТГ, Макс):", reply_markup=dialog_keyboard)
-            await safe_delete(update, context, msg, delay=3, keep=False)
+            await add_message_to_delete(update, context, msg)
         elif step == 'contact':
             state['contact'] = text
             state['step'] = 'holiday'
+            await clear_previous_messages(update, context)
+            await delete_user_message(update, context)
             msg = await update.message.reply_text("📝 Дата праздника (ДД.ММ.ГГГГ или текст):", reply_markup=dialog_keyboard)
-            await safe_delete(update, context, msg, delay=3, keep=False)
+            await add_message_to_delete(update, context, msg)
         elif step == 'holiday':
             state['holiday'] = text
             state['step'] = 'city'
+            await clear_previous_messages(update, context)
+            await delete_user_message(update, context)
             msg = await update.message.reply_text("📝 Город (Москва, СПб, другой или 'неважно'):", reply_markup=dialog_keyboard)
-            await safe_delete(update, context, msg, delay=3, keep=False)
+            await add_message_to_delete(update, context, msg)
         elif step == 'city':
             state['city'] = text
             state['step'] = 'format'
+            await clear_previous_messages(update, context)
+            await delete_user_message(update, context)
             msg = await update.message.reply_text("📝 Формат (печать / электронная):", reply_markup=dialog_keyboard)
-            await safe_delete(update, context, msg, delay=3, keep=False)
+            await add_message_to_delete(update, context, msg)
         elif step == 'format':
             state['format'] = text
             state['step'] = 'status'
+            await clear_previous_messages(update, context)
+            await delete_user_message(update, context)
             msg = await update.message.reply_text("📝 Статус (дизайн / печать / отправлено):", reply_markup=dialog_keyboard)
-            await safe_delete(update, context, msg, delay=3, keep=False)
+            await add_message_to_delete(update, context, msg)
         elif step == 'status':
             state['status'] = text
             state['step'] = 'amount'
+            await clear_previous_messages(update, context)
+            await delete_user_message(update, context)
             msg = await update.message.reply_text("📝 Сумма (число):", reply_markup=dialog_keyboard)
-            await safe_delete(update, context, msg, delay=3, keep=False)
+            await add_message_to_delete(update, context, msg)
         elif step == 'amount':
             state['amount'] = text
             try:
@@ -1247,12 +1326,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     state['status'], 'Оплачено', amount_value
                 ]
                 sheet_orders.append_row(row)
+                # Важное сообщение, не удаляем
+                await clear_previous_messages(update, context)
+                await delete_user_message(update, context)
                 msg = await update.message.reply_text("✅ Заказ добавлен!", reply_markup=main_keyboard)
-                await safe_delete(update, context, msg, delay=5, keep=True)  # важное сообщение
                 await context.bot.send_message(ADMIN_CHAT_ID, f"🆕 Новый заказ от {state['client']} на сумму {amount_value} руб.")
             except Exception as e:
                 msg = await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=main_keyboard)
-                await safe_delete(update, context, msg, delay=3, keep=False)
+                await add_message_to_delete(update, context, msg)
             del user_data[chat_id]
         return
 
@@ -1275,12 +1356,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parsed['amount']
                 ]
                 sheet_orders.append_row(row)
+                # Важное сообщение, не удаляем
+                await clear_previous_messages(update, context)
+                await delete_user_message(update, context)
                 msg = await update.message.reply_text(
                     f"✅ Заказ от {parsed['client']} успешно добавлен!\n"
                     f"Сумма: {parsed['amount']} руб.",
                     reply_markup=main_keyboard
                 )
-                await safe_delete(update, context, msg, delay=5, keep=True)  # важное сообщение
                 await context.bot.send_message(ADMIN_CHAT_ID,
                     f"🆕 Быстрый заказ от {parsed['client']} на сумму {parsed['amount']} руб.")
                 return
@@ -1291,10 +1374,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Используйте кнопку '⚡ Быстрый заказ' для просмотра шаблона.",
                 reply_markup=main_keyboard
             )
-            await safe_delete(update, context, msg, delay=5, keep=False)
+            await add_message_to_delete(update, context, msg)
             return
 
     # Кнопки главного меню
+    await clear_previous_messages(update, context)
+    await delete_user_message(update, context)
+
     if text == "📦 Пошаговый заказ":
         await new_order(update, context)
     elif text == "⚡ Быстрый заказ":
@@ -1321,7 +1407,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Для быстрого заказа отправьте данные в 5 строк по шаблону.",
             reply_markup=main_keyboard
         )
-        await safe_delete(update, context, msg, delay=3, keep=False)
+        await add_message_to_delete(update, context, msg)
 
 # ============================================
 #  РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ
@@ -1372,7 +1458,7 @@ app.add_handler(CallbackQueryHandler(filter_callback, pattern='^(filter_|page_|s
 app.add_handler(CallbackQueryHandler(edit_callback, pattern='^(edit_|set_|delete_order_|cancel_edit)'))
 app.add_handler(CallbackQueryHandler(delete_callback, pattern='^(confirm_delete|cancel_delete)'))
 app.add_handler(CallbackQueryHandler(screenshot_choice_callback, pattern='^screenshot_'))
-app.add_handler(CallbackQueryHandler(exp_pagination_callback, pattern='^exp_'))
+app.add_handler(CallbackQueryHandler(exp_pagination_callback, pattern='^exp_page_'))
 app.add_handler(CallbackQueryHandler(exp_delete_start, pattern='^exp_delete_'))
 app.add_handler(CallbackQueryHandler(exp_delete_confirm, pattern='^exp_confirm_delete|exp_cancel_delete'))
 app.add_error_handler(error_handler)
