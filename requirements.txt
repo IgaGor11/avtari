@@ -2,3 +2,5 @@ python-telegram-bot
 gspread
 oauth2client
 aiohttp
+matplotlib
+Pillow
