@@ -256,6 +256,13 @@ def parse_quick_order(text):
 
 def generate_screenshot(sheet_type='orders'):
     try:
+        import matplotlib
+        matplotlib.use('Agg')  # Без GUI
+        import matplotlib.pyplot as plt
+        from matplotlib.font_manager import FontProperties
+        import tempfile
+        from io import BytesIO
+
         if sheet_type == 'orders':
             sheet = sheet_orders
             title = "Заказы"
@@ -267,26 +274,44 @@ def generate_screenshot(sheet_type='orders'):
             col_count = 3
             col_widths = [0.2, 0.5, 0.3]
 
+        # Получаем данные
         records = sheet.get_all_values()
         if len(records) <= 1:
             print(f"[LOG] Нет данных для скриншота {title}")
             return None
 
+        # Берём заголовки (если есть) или создаём стандартные
         headers = records[0] if records and len(records[0]) >= col_count else [f"Колонка{i+1}" for i in range(col_count)]
-        data = records[1:11]
+        data = records[1:11]  # последние 10 записей
         if not data:
             print(f"[LOG] Нет записей для скриншота {title}")
             return None
 
+        # Очищаем данные от пустых строк
+        clean_data = []
+        for row in data:
+            if any(row):  # если есть хоть одно непустое значение
+                clean_data.append(row[:col_count])
+        if not clean_data:
+            print(f"[LOG] После очистки нет записей для скриншота {title}")
+            return None
+
+        # Настраиваем шрифт (обход ошибок с отсутствием шрифтов)
+        try:
+            plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial', 'Helvetica', 'sans-serif']
+        except:
+            pass
+
         fig_width = 12 if sheet_type == 'orders' else 10
-        fig, ax = plt.subplots(figsize=(fig_width, 0.5 + 0.5 * len(data)))
+        fig, ax = plt.subplots(figsize=(fig_width, 0.5 + 0.5 * len(clean_data)))
         ax.axis('tight')
         ax.axis('off')
         ax.set_title(f"📊 {title} (последние 10)", fontsize=14, weight='bold')
 
+        # Строим таблицу
         table_data = []
         table_data.append(headers[:col_count])
-        for row in data:
+        for row in clean_data:
             row_filled = row + [''] * (col_count - len(row))
             table_data.append(row_filled[:col_count])
 
@@ -296,6 +321,7 @@ def generate_screenshot(sheet_type='orders'):
         table.set_fontsize(9)
         table.scale(1.2, 1.5)
 
+        # Стилизация
         for (i, j), cell in table.get_cell_dict().items():
             if i == 0:
                 cell.set_facecolor('#4CAF50')
@@ -304,13 +330,16 @@ def generate_screenshot(sheet_type='orders'):
                 cell.set_facecolor('#f9f9f9' if i % 2 == 0 else '#e8f5e9')
             cell.set_edgecolor('#cccccc')
 
+        # Сохраняем в BytesIO
         img_bytes = BytesIO()
         plt.savefig(img_bytes, format='png', bbox_inches='tight', dpi=150, facecolor='white')
         plt.close(fig)
         img_bytes.seek(0)
         return img_bytes
+
     except Exception as e:
         print(f"[ERROR] generate_screenshot: {e}")
+        import traceback
         traceback.print_exc()
         return None
 
