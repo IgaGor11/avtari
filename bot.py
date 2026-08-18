@@ -6,11 +6,7 @@ import io
 import re
 import gspread
 import traceback
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from matplotlib.font_manager import FontProperties
-from PIL import Image
-import tempfile
+from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
 from oauth2client.service_account import ServiceAccountCredentials
 from aiohttp import web
@@ -118,7 +114,7 @@ screenshot_choice_keyboard = InlineKeyboardMarkup([
 ])
 
 # ============================================
-#  ФУНКЦИИ НОРМАЛИЗАЦИИ, ПАРСИНГА, ГЕНЕРАЦИИ
+#  ФУНКЦИИ НОРМАЛИЗАЦИИ, ПАРСИНГА
 # ============================================
 
 def normalize_date(date_str):
@@ -251,95 +247,93 @@ def parse_quick_order(text):
         raise ValueError(f"Ошибка парсинга: {e}")
 
 # ============================================
-#  ГЕНЕРАЦИЯ СКРИНШОТА (BytesIO)
+#  ГЕНЕРАЦИЯ СКРИНШОТА (через PIL, без matplotlib)
 # ============================================
 
 def generate_screenshot(sheet_type='orders'):
     try:
-        import matplotlib
-        matplotlib.use('Agg')  # Без GUI
-        import matplotlib.pyplot as plt
-        from matplotlib.font_manager import FontProperties
-        import tempfile
-        from io import BytesIO
-
         if sheet_type == 'orders':
             sheet = sheet_orders
             title = "Заказы"
-            col_count = 10
-            col_widths = [0.08, 0.12, 0.1, 0.1, 0.12, 0.08, 0.1, 0.12, 0.08, 0.08]
         else:
             sheet = sheet_expenses
             title = "Расходы"
-            col_count = 3
-            col_widths = [0.2, 0.5, 0.3]
 
-        # Получаем данные
         records = sheet.get_all_values()
         if len(records) <= 1:
             print(f"[LOG] Нет данных для скриншота {title}")
             return None
 
-        # Берём заголовки (если есть) или создаём стандартные
-        headers = records[0] if records and len(records[0]) >= col_count else [f"Колонка{i+1}" for i in range(col_count)]
-        data = records[1:11]  # последние 10 записей
+        # Берем заголовки и данные (до 10 строк)
+        headers = records[0] if records else []
+        data = records[1:11]
         if not data:
             print(f"[LOG] Нет записей для скриншота {title}")
             return None
 
-        # Очищаем данные от пустых строк
+        # Очищаем от пустых строк
         clean_data = []
         for row in data:
-            if any(row):  # если есть хоть одно непустое значение
-                clean_data.append(row[:col_count])
+            if any(row):
+                clean_data.append(row)
         if not clean_data:
             print(f"[LOG] После очистки нет записей для скриншота {title}")
             return None
 
-        # Настраиваем шрифт (обход ошибок с отсутствием шрифтов)
+        # Настройка шрифта (используем стандартный)
         try:
-            plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial', 'Helvetica', 'sans-serif']
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
+            font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 12)
         except:
-            pass
+            # Если шрифт не найден, используем дефолтный
+            font = ImageFont.load_default()
+            font_bold = ImageFont.load_default()
 
-        fig_width = 12 if sheet_type == 'orders' else 10
-        fig, ax = plt.subplots(figsize=(fig_width, 0.5 + 0.5 * len(clean_data)))
-        ax.axis('tight')
-        ax.axis('off')
-        ax.set_title(f"📊 {title} (последние 10)", fontsize=14, weight='bold')
+        # Определяем размеры
+        cell_padding = 5
+        col_width = 120
+        row_height = 25
+        header_rows = 1
+        data_rows = len(clean_data)
+        total_rows = header_rows + data_rows
 
-        # Строим таблицу
-        table_data = []
-        table_data.append(headers[:col_count])
-        for row in clean_data:
-            row_filled = row + [''] * (col_count - len(row))
-            table_data.append(row_filled[:col_count])
+        img_width = (len(headers) * col_width) + cell_padding * 2
+        img_height = (total_rows * row_height) + cell_padding * 2
 
-        table = ax.table(cellText=table_data, loc='center', cellLoc='left',
-                         colWidths=col_widths[:col_count])
-        table.auto_set_font_size(False)
-        table.set_fontsize(9)
-        table.scale(1.2, 1.5)
+        # Создаём изображение
+        img = Image.new('RGB', (img_width, img_height), color='white')
+        draw = ImageDraw.Draw(img)
 
-        # Стилизация
-        for (i, j), cell in table.get_cell_dict().items():
-            if i == 0:
-                cell.set_facecolor('#4CAF50')
-                cell.set_text_props(weight='bold', color='white')
-            else:
-                cell.set_facecolor('#f9f9f9' if i % 2 == 0 else '#e8f5e9')
-            cell.set_edgecolor('#cccccc')
+        # Рисуем сетку
+        x0, y0 = cell_padding, cell_padding
+        for i in range(total_rows + 1):
+            y = y0 + i * row_height
+            draw.line([(x0, y), (x0 + len(headers) * col_width, y)], fill='black', width=1)
+        for j in range(len(headers) + 1):
+            x = x0 + j * col_width
+            draw.line([(x, y0), (x, y0 + total_rows * row_height)], fill='black', width=1)
+
+        # Заполняем заголовки
+        for j, header in enumerate(headers[:len(headers)]):
+            x = x0 + j * col_width + cell_padding
+            y = y0 + cell_padding
+            draw.text((x, y), str(header), fill='black', font=font_bold)
+
+        # Заполняем данные
+        for i, row in enumerate(clean_data):
+            for j, cell in enumerate(row[:len(headers)]):
+                x = x0 + j * col_width + cell_padding
+                y = y0 + (i + 1) * row_height + cell_padding
+                draw.text((x, y), str(cell), fill='black', font=font)
 
         # Сохраняем в BytesIO
         img_bytes = BytesIO()
-        plt.savefig(img_bytes, format='png', bbox_inches='tight', dpi=150, facecolor='white')
-        plt.close(fig)
+        img.save(img_bytes, format='PNG')
         img_bytes.seek(0)
         return img_bytes
 
     except Exception as e:
         print(f"[ERROR] generate_screenshot: {e}")
-        import traceback
         traceback.print_exc()
         return None
 
@@ -539,9 +533,9 @@ async def screenshot_choice_callback(update: Update, context: ContextTypes.DEFAU
     sheet_type = "orders" if data == "screenshot_orders" else "expenses"
     await query.edit_message_text(f"⏳ Генерирую скриншот таблицы '{'Заказы' if sheet_type == 'orders' else 'Расходы'}'...")
 
-    img_bytes = generate_screenshot(sheet_type)
-    if img_bytes:
-        try:
+    try:
+        img_bytes = generate_screenshot(sheet_type)
+        if img_bytes:
             caption = "📸 *Последние 10 записей в таблице Заказы*" if sheet_type == 'orders' else "📸 *Последние 10 записей в таблице Расходы*"
             await query.message.reply_photo(
                 photo=img_bytes,
@@ -550,12 +544,15 @@ async def screenshot_choice_callback(update: Update, context: ContextTypes.DEFAU
                 reply_markup=main_keyboard
             )
             await query.delete_message()
-        except Exception as e:
-            error_msg = f"❌ Ошибка при отправке скриншота: {e}"
-            await query.message.reply_text(error_msg, reply_markup=main_keyboard)
-    else:
-        error_msg = "❌ Не удалось создать скриншот: в таблице нет данных или произошла ошибка."
-        await query.message.reply_text(error_msg, reply_markup=main_keyboard)
+        else:
+            await query.edit_message_text(
+                "❌ Не удалось создать скриншот: в таблице нет данных или произошла ошибка.\n"
+                "Проверьте логи Render для подробностей.",
+                reply_markup=None
+            )
+    except Exception as e:
+        error_text = f"❌ Ошибка при создании скриншота:\n{str(e)}"
+        await query.edit_message_text(error_text, reply_markup=None)
 
 # ---------- Ссылка на таблицу ----------
 async def table_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
