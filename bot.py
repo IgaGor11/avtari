@@ -11,6 +11,7 @@ import matplotlib.patches as patches
 from matplotlib.font_manager import FontProperties
 from PIL import Image
 import tempfile
+from io import BytesIO
 from oauth2client.service_account import ServiceAccountCredentials
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
@@ -40,7 +41,6 @@ user_data = {}
 # ============================================
 
 async def clear_previous_messages(update, context, exclude=None):
-    """Удаляет все сообщения, сохранённые для удаления, кроме exclude."""
     msgs = context.user_data.get('msgs_to_delete', [])
     if msgs:
         for chat_id, msg_id in msgs:
@@ -53,10 +53,8 @@ async def clear_previous_messages(update, context, exclude=None):
         context.user_data['msgs_to_delete'] = []
 
 async def add_message_to_delete(update, context, message):
-    """Добавляет сообщение (бот или пользователя) в список для удаления, если у него нет клавиатуры."""
     if not message:
         return
-    # Если сообщение содержит инлайн-клавиатуру, не удаляем его
     if message.reply_markup:
         return
     chat_id = update.effective_chat.id
@@ -66,7 +64,6 @@ async def add_message_to_delete(update, context, message):
     context.user_data['msgs_to_delete'].append((chat_id, msg_id))
 
 async def delete_user_message(update, context):
-    """Удаляет сообщение пользователя (если оно есть)."""
     if update.message:
         try:
             await context.bot.delete_message(
@@ -291,6 +288,10 @@ def parse_quick_order(text):
     except Exception as e:
         raise ValueError(f"Ошибка парсинга: {e}")
 
+# ============================================
+#  НОВАЯ ФУНКЦИЯ СКРИНШОТА (BytesIO)
+# ============================================
+
 def generate_screenshot(sheet_type='orders'):
     try:
         if sheet_type == 'orders':
@@ -341,17 +342,19 @@ def generate_screenshot(sheet_type='orders'):
                 cell.set_facecolor('#f9f9f9' if i % 2 == 0 else '#e8f5e9')
             cell.set_edgecolor('#cccccc')
 
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-            plt.savefig(tmp.name, bbox_inches='tight', dpi=150, facecolor='white')
-            plt.close(fig)
-            return tmp.name
+        # Сохраняем в BytesIO
+        img_bytes = BytesIO()
+        plt.savefig(img_bytes, format='png', bbox_inches='tight', dpi=150, facecolor='white')
+        plt.close(fig)
+        img_bytes.seek(0)
+        return img_bytes
     except Exception as e:
         print(f"[ERROR] generate_screenshot: {e}")
         traceback.print_exc()
         return None
 
 # ============================================
-#  ОБРАБОТЧИКИ КОМАНД (с управлением удалением)
+#  ОБРАБОТЧИКИ КОМАНД
 # ============================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -563,7 +566,7 @@ async def export_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=main_keyboard)
         await add_message_to_delete(update, context, msg)
 
-# ---------- Скриншот ----------
+# ---------- Скриншот (новая версия с BytesIO) ----------
 async def screenshot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await clear_previous_messages(update, context)
     await delete_user_message(update, context)
@@ -578,7 +581,7 @@ async def screenshot_choice_callback(update: Update, context: ContextTypes.DEFAU
     await query.answer()
     data = query.data
 
-    exclude_id = query.message.message_id  # не удаляем текущее сообщение
+    exclude_id = query.message.message_id
 
     if data == "cancel_screenshot":
         await query.edit_message_text("❌ Скриншот отменён.", reply_markup=None)
@@ -588,36 +591,28 @@ async def screenshot_choice_callback(update: Update, context: ContextTypes.DEFAU
 
     sheet_type = "orders" if data == "screenshot_orders" else "expenses"
     await query.edit_message_text(f"⏳ Генерирую скриншот таблицы '{'Заказы' if sheet_type == 'orders' else 'Расходы'}'...")
-    img_path = generate_screenshot(sheet_type)
-    if img_path:
+
+    img_bytes = generate_screenshot(sheet_type)
+    if img_bytes:
         try:
-            with open(img_path, 'rb') as img_file:
-                caption = "📸 *Последние 10 записей в таблице Заказы*" if sheet_type == 'orders' else "📸 *Последние 10 записей в таблице Расходы*"
-                msg = await query.message.reply_photo(
-                    photo=img_file,
-                    caption=caption,
-                    parse_mode="Markdown",
-                    reply_markup=main_keyboard
-                )
-                await add_message_to_delete(update, context, msg)
-            os.unlink(img_path)
+            caption = "📸 *Последние 10 записей в таблице Заказы*" if sheet_type == 'orders' else "📸 *Последние 10 записей в таблице Расходы*"
+            await query.message.reply_photo(
+                photo=img_bytes,
+                caption=caption,
+                parse_mode="Markdown",
+                reply_markup=main_keyboard
+            )
+            await query.delete_message()
         except Exception as e:
             error_msg = f"❌ Ошибка при отправке скриншота: {e}"
             msg = await query.message.reply_text(error_msg, reply_markup=main_keyboard)
             await add_message_to_delete(update, context, msg)
     else:
-        # Явно пишем в чат, что не удалось создать скриншот
         error_msg = "❌ Не удалось создать скриншот: в таблице нет данных или произошла ошибка."
         msg = await query.message.reply_text(error_msg, reply_markup=main_keyboard)
         await add_message_to_delete(update, context, msg)
 
-    # Удаляем предыдущие сообщения, кроме текущего
     await clear_previous_messages(update, context, exclude=exclude_id)
-    # Удаляем сообщение с колбэком (сам запрос) после того, как всё обработано
-    try:
-        await query.delete_message()
-    except:
-        pass
 
 # ---------- Ссылка на таблицу ----------
 async def table_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -632,7 +627,7 @@ async def table_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await add_message_to_delete(update, context, msg)
 
 # ============================================
-#  УПРАВЛЕНИЕ РАСХОДАМИ
+#  УПРАВЛЕНИЕ РАСХОДАМИ (код без изменений)
 # ============================================
 
 async def expenses_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -721,7 +716,7 @@ async def exp_pagination_callback(update: Update, context: ContextTypes.DEFAULT_
         context.user_data['exp_page'] = context.user_data.get('exp_page', 1) + 1
     await show_expenses_page(update, context, callback=True)
 
-# ---------- Редактирование расхода (диалог) ----------
+# ---------- Редактирование расхода ----------
 EXP_EDIT_FIELD, EXP_EDIT_VALUE = 4, 5
 
 async def exp_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -785,7 +780,6 @@ async def exp_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
         else:
             sheet_expenses.update_cell(row_num, 2, text)
-        # Важное сообщение (не удаляем)
         await clear_previous_messages(update, context)
         await delete_user_message(update, context)
         msg = await update.message.reply_text(f"✅ Расход #{exp_id} обновлён.", reply_markup=main_keyboard)
@@ -835,7 +829,6 @@ async def exp_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
             try:
                 sheet_expenses.delete_rows(exp_id + 1, exp_id + 1)
                 await query.edit_message_text(f"✅ Расход #{exp_id} удалён.")
-                # Важное сообщение, не удаляем
                 msg = await query.message.reply_text("Главное меню:", reply_markup=main_keyboard)
             except Exception as e:
                 await query.edit_message_text(f"❌ Ошибка: {e}")
@@ -1173,7 +1166,6 @@ async def delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 sheet_orders.delete_rows(row_num, row_num)
                 await query.edit_message_text(f"✅ Заказ #{order_id} удалён.")
-                # Важное сообщение, не удаляем
                 msg = await query.message.reply_text("Главное меню:", reply_markup=main_keyboard)
             except Exception as e:
                 await query.edit_message_text(f"❌ Ошибка: {e}")
@@ -1231,7 +1223,6 @@ async def handle_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
         else:
             sheet_orders.update_cell(row_num, col, text)
-        # Важное сообщение, не удаляем
         await clear_previous_messages(update, context)
         await delete_user_message(update, context)
         msg = await update.message.reply_text(f"✅ Поле '{field}' обновлено.", reply_markup=main_keyboard)
