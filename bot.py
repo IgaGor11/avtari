@@ -256,7 +256,7 @@ def generate_screenshot(sheet_type='orders'):
             sheet = sheet_orders
             title = "Заказы"
             # Ширина столбцов: дата – шире, остальные – стандартные
-            col_widths = [150, 120, 100, 100, 120, 100, 100, 120, 100, 100]  # для 10 колонок
+            col_widths = [150, 120, 150, 100, 120, 100, 100, 120, 100, 100]  # для 10 колонок
         else:
             sheet = sheet_expenses
             title = "Расходы"
