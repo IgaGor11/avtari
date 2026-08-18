@@ -306,11 +306,13 @@ def generate_screenshot(sheet_type='orders'):
 
         records = sheet.get_all_values()
         if len(records) <= 1:
+            print(f"[LOG] Нет данных для скриншота {title}")
             return None
 
-        headers = records[0]
+        headers = records[0] if records and len(records[0]) >= col_count else [f"Колонка{i+1}" for i in range(col_count)]
         data = records[1:11]
         if not data:
+            print(f"[LOG] Нет записей для скриншота {title}")
             return None
 
         fig_width = 12 if sheet_type == 'orders' else 10
@@ -600,11 +602,15 @@ async def screenshot_choice_callback(update: Update, context: ContextTypes.DEFAU
                 await add_message_to_delete(update, context, msg)
             os.unlink(img_path)
         except Exception as e:
-            msg = await query.message.reply_text(f"❌ Ошибка при отправке скриншота: {e}", reply_markup=main_keyboard)
+            error_msg = f"❌ Ошибка при отправке скриншота: {e}"
+            msg = await query.message.reply_text(error_msg, reply_markup=main_keyboard)
             await add_message_to_delete(update, context, msg)
     else:
-        msg = await query.message.reply_text("📭 Нет данных для отображения.", reply_markup=main_keyboard)
+        # Явно пишем в чат, что не удалось создать скриншот
+        error_msg = "❌ Не удалось создать скриншот: в таблице нет данных или произошла ошибка."
+        msg = await query.message.reply_text(error_msg, reply_markup=main_keyboard)
         await add_message_to_delete(update, context, msg)
+
     # Удаляем предыдущие сообщения, кроме текущего
     await clear_previous_messages(update, context, exclude=exclude_id)
     # Удаляем сообщение с колбэком (сам запрос) после того, как всё обработано
