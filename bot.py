@@ -247,7 +247,7 @@ def parse_quick_order(text):
         raise ValueError(f"Ошибка парсинга: {e}")
 
 # ============================================
-#  ГЕНЕРАЦИЯ СКРИНШОТА (через PIL, без matplotlib)
+#  ГЕНЕРАЦИЯ СКРИНШОТА (PIL, с улучшенной шириной столбцов и оформлением)
 # ============================================
 
 def generate_screenshot(sheet_type='orders'):
@@ -255,16 +255,18 @@ def generate_screenshot(sheet_type='orders'):
         if sheet_type == 'orders':
             sheet = sheet_orders
             title = "Заказы"
+            # Ширина столбцов: дата – шире, остальные – стандартные
+            col_widths = [150, 120, 100, 100, 120, 100, 100, 120, 100, 100]  # для 10 колонок
         else:
             sheet = sheet_expenses
             title = "Расходы"
+            col_widths = [150, 250, 120]  # дата, описание, сумма
 
         records = sheet.get_all_values()
         if len(records) <= 1:
             print(f"[LOG] Нет данных для скриншота {title}")
             return None
 
-        # Берем заголовки и данные (до 10 строк)
         headers = records[0] if records else []
         data = records[1:11]
         if not data:
@@ -280,51 +282,85 @@ def generate_screenshot(sheet_type='orders'):
             print(f"[LOG] После очистки нет записей для скриншота {title}")
             return None
 
-        # Настройка шрифта (используем стандартный)
+        # Определяем количество колонок (по количеству заголовков)
+        col_count = len(headers) if headers else len(col_widths)
+        # Обрезаем col_widths до реального количества колонок
+        col_widths = col_widths[:col_count]
+
+        # Настройка шрифта
         try:
             font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
             font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 12)
+            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 11)
         except:
-            # Если шрифт не найден, используем дефолтный
             font = ImageFont.load_default()
             font_bold = ImageFont.load_default()
+            font_small = font
 
-        # Определяем размеры
+        # Вычисляем размеры изображения
         cell_padding = 5
-        col_width = 120
         row_height = 25
         header_rows = 1
         data_rows = len(clean_data)
         total_rows = header_rows + data_rows
 
-        img_width = (len(headers) * col_width) + cell_padding * 2
-        img_height = (total_rows * row_height) + cell_padding * 2
+        total_width = sum(col_widths) + cell_padding * 2
+        total_height = total_rows * row_height + cell_padding * 2
 
-        # Создаём изображение
-        img = Image.new('RGB', (img_width, img_height), color='white')
+        # Создаём изображение с белым фоном
+        img = Image.new('RGB', (total_width, total_height), color='white')
         draw = ImageDraw.Draw(img)
 
-        # Рисуем сетку
+        # Рисуем сетку и заливку
         x0, y0 = cell_padding, cell_padding
+
+        # Заливка заголовка
+        header_y0 = y0
+        header_y1 = y0 + row_height
+        draw.rectangle([x0, header_y0, x0 + total_width - cell_padding*2, header_y1], fill='#e6e6e6')
+
+        # Рисуем линии сетки (горизонтальные)
         for i in range(total_rows + 1):
             y = y0 + i * row_height
-            draw.line([(x0, y), (x0 + len(headers) * col_width, y)], fill='black', width=1)
-        for j in range(len(headers) + 1):
-            x = x0 + j * col_width
-            draw.line([(x, y0), (x, y0 + total_rows * row_height)], fill='black', width=1)
+            draw.line([(x0, y), (x0 + sum(col_widths), y)], fill='#cccccc', width=1)
+
+        # Вертикальные линии
+        x_pos = x0
+        for w in col_widths:
+            x_pos += w
+            draw.line([(x_pos, y0), (x_pos, y0 + total_rows * row_height)], fill='#cccccc', width=1)
 
         # Заполняем заголовки
-        for j, header in enumerate(headers[:len(headers)]):
-            x = x0 + j * col_width + cell_padding
+        for j, header in enumerate(headers[:col_count]):
+            x = x0 + sum(col_widths[:j]) + cell_padding
             y = y0 + cell_padding
-            draw.text((x, y), str(header), fill='black', font=font_bold)
+            draw.text((x, y), str(header), fill='#333333', font=font_bold)
 
-        # Заполняем данные
+        # Заполняем данные с чередованием фона
         for i, row in enumerate(clean_data):
-            for j, cell in enumerate(row[:len(headers)]):
-                x = x0 + j * col_width + cell_padding
-                y = y0 + (i + 1) * row_height + cell_padding
-                draw.text((x, y), str(cell), fill='black', font=font)
+            # Определяем цвет фона строки (светло-серый / белый)
+            if i % 2 == 0:
+                bg_color = '#f2f2f2'
+            else:
+                bg_color = '#ffffff'
+            row_y0 = y0 + (i + 1) * row_height
+            row_y1 = row_y0 + row_height
+            draw.rectangle([x0, row_y0, x0 + sum(col_widths), row_y1], fill=bg_color)
+
+            for j, cell in enumerate(row[:col_count]):
+                x = x0 + sum(col_widths[:j]) + cell_padding
+                y = row_y0 + cell_padding
+                # Используем обычный шрифт
+                draw.text((x, y), str(cell), fill='#444444', font=font)
+
+        # Добавляем легенду / подпись
+        footer_text = f"📊 {title} (последние {len(clean_data)} записей)"
+        try:
+            footer_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 10)
+        except:
+            footer_font = font_bold
+        footer_y = total_height - 15
+        draw.text((cell_padding, footer_y), footer_text, fill='#888888', font=footer_font)
 
         # Сохраняем в BytesIO
         img_bytes = BytesIO()
