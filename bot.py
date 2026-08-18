@@ -53,8 +53,11 @@ async def clear_previous_messages(update, context, exclude=None):
         context.user_data['msgs_to_delete'] = []
 
 async def add_message_to_delete(update, context, message):
-    """Добавляет сообщение (бот или пользователя) в список для удаления."""
+    """Добавляет сообщение (бот или пользователя) в список для удаления, если у него нет клавиатуры."""
     if not message:
+        return
+    # Если сообщение содержит инлайн-клавиатуру, не удаляем его
+    if message.reply_markup:
         return
     chat_id = update.effective_chat.id
     msg_id = message.message_id
